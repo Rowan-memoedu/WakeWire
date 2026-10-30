@@ -156,7 +156,10 @@ export class JsonRpcChild extends JsonRpcPeer {
   }
 
   override start(): void {
-    const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(this.command, this.args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
     this.child = child;
     this.exited = false;
     this.childClosed = new Promise<void>((resolve) => child.once("close", () => resolve()));

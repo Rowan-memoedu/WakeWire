@@ -4,6 +4,10 @@ export interface DeliveryOptions {
   sandbox: SandboxPolicy;
   /** Working directory override (used for new threads; ignored for resume by some adapters). */
   cwd?: string | undefined;
+  /** Persist intent before an RPC can create a thread/turn. */
+  onSending?: (() => void) | undefined;
+  /** Persist identities as soon as the server acknowledges them. */
+  onAccepted?: ((result: DeliveryResult) => void) | undefined;
 }
 
 export interface DeliveryResult {

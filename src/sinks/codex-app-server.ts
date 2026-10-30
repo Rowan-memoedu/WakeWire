@@ -123,12 +123,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
       return this.withPrivateSession((session) => session.startThread(prompt, opts));
     }
     const rpc = await this.connect();
+    opts.onSending?.();
     const started = await this.call<ThreadResumeResponse>(rpc, "thread/start", {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
-      sandbox: opts.sandbox,
-      approvalPolicy: "never",
+      ...(opts.sandbox === "user-config" ? {} : { sandbox: opts.sandbox, approvalPolicy: "never" }),
       ...(this.config.model ? { model: this.config.model } : {}),
     });
+    opts.onAccepted?.({ threadId: started.thread.id });
     return this.runTurn(rpc, started.thread.id, prompt, opts);
   }
 
@@ -152,14 +153,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
     void completion.catch(() => {});
     let turnId: string;
     try {
+      opts.onSending?.();
       const started = await this.call<TurnStartResponse>(rpc, "turn/start", {
         threadId,
         input: [{ type: "text", text: prompt }],
-        approvalPolicy: "never",
-        sandboxPolicy: sandboxPolicyFor(opts),
+        ...(opts.sandbox === "user-config"
+          ? {}
+          : {
+              approvalPolicy: "never",
+              sandboxPolicy: sandboxPolicyFor(opts),
+            }),
         ...(this.config.model ? { model: this.config.model } : {}),
       });
       turnId = started.turn.id;
+      opts.onAccepted?.({ threadId, turnId });
     } catch (err) {
       this.cancelWaiter(threadId, err instanceof Error ? err : new Error(String(err)));
       throw err;
@@ -357,6 +364,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       );
       const child = spawn(bin, ["app-server", "--listen", url], {
         stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true,
       });
       child.stderr?.on("data", (chunk: Buffer) => {
         this.logger.debug({ stderr: chunk.toString().trim() }, "shared app-server stderr");

@@ -131,6 +131,30 @@ const MIGRATIONS: ReadonlyArray<{
       CREATE INDEX captures_source ON captures (source_id, received_at);
     `,
   },
+  {
+    version: 5,
+    name: "dispatch-receipts-and-user-config",
+    disableForeignKeys: true,
+    sql: `
+      ALTER TABLE deliveries ADD COLUMN dispatch_started INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE routes_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        match_json TEXT NOT NULL,
+        target_json TEXT NOT NULL,
+        prompt_template TEXT,
+        sandbox_policy TEXT NOT NULL DEFAULT 'read-only'
+          CHECK (sandbox_policy IN ('read-only', 'workspace-write', 'user-config')),
+        rate_limit_per_minute INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO routes_new SELECT * FROM routes;
+      DROP TABLE routes;
+      ALTER TABLE routes_new RENAME TO routes;
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */

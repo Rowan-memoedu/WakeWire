@@ -319,6 +319,75 @@ describe("DeliveryQueue", () => {
     expect(adapter.calls).toHaveLength(0);
     expect(stores.deliveries.get(delivery?.id ?? "")?.status).toBe("queued");
   });
+
+  it("persists native identities before completion and never retries after a side effect", async () => {
+    const newRoute = stores.routes.create(
+      routeInput({ target: { type: "new-thread", cwd: "/tmp", worktree: false } }),
+    );
+    const delivery = queue.enqueueEvent(newRoute, makeEvent("partial"));
+    let observed: unknown;
+    adapter.startThread = async (_prompt, opts) => {
+      opts.onSending?.();
+      opts.onAccepted?.({ threadId: "native-id" });
+      opts.onAccepted?.({ threadId: "native-id", turnId: "accepted-turn" });
+      observed = stores.deliveries.get(delivery?.id ?? "");
+      throw new UnreachableError("lost completion connection");
+    };
+    await queue.tick();
+    expect(observed).toMatchObject({
+      status: "delivering",
+      threadId: "native-id",
+      turnId: "accepted-turn",
+    });
+    expect(stores.deliveries.get(delivery?.id ?? "")).toMatchObject({
+      status: "failed",
+      threadId: "native-id",
+      turnId: "accepted-turn",
+      dispatchStarted: true,
+    });
+    expect(stores.deliveries.listReady()).toEqual([]);
+  });
+
+  it("does not requeue an unknown request after daemon restart", () => {
+    const delivery = queue.enqueueEvent(route, makeEvent("unknown"));
+    const id = delivery?.id ?? "";
+    stores.deliveries.markDelivering(id);
+    stores.deliveries.markSending(id);
+    stores.deliveries.resetInFlight();
+    expect(stores.deliveries.get(id)?.status).toBe("failed");
+    expect(stores.deliveries.listReady()).toEqual([]);
+  });
+
+  it("keeps new-thread events independent even above the digest threshold", async () => {
+    now = new Date();
+    const newRoute = stores.routes.create(
+      routeInput({
+        rateLimitPerMinute: 1,
+        target: { type: "new-thread", cwd: "/tmp", worktree: false },
+      }),
+    );
+    for (const id of ["first", "second", "third"]) queue.enqueueEvent(newRoute, makeEvent(id));
+    await queue.tick();
+    await queue.tick();
+    expect(adapter.calls).toHaveLength(1);
+    now = new Date(now.getTime() + 61_000);
+    await queue.tick();
+    now = new Date(now.getTime() + 61_000);
+    await queue.tick();
+    expect(adapter.calls).toHaveLength(3);
+    expect(stores.deliveries.list({ status: "coalesced" })).toEqual([]);
+    expect(
+      new Set(stores.deliveries.list({ status: "delivered" }).map((row) => row.threadId)).size,
+    ).toBe(3);
+  });
+
+  it("finds the original receipt even when duplicate audit rows are newer", () => {
+    const first = queue.enqueueEvent(route, makeEvent("stable-id"));
+    for (let i = 0; i < 4; i++) queue.enqueueEvent(route, makeEvent("stable-id"));
+    expect(
+      stores.deliveries.list({ routeId: route.id, sourceDeliveryId: "stable-id", limit: 1 })[0]?.id,
+    ).toBe(first?.id);
+  });
 });
 
 function promptDeliveryId(prompt: string): string {

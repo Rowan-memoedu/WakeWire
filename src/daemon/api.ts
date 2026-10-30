@@ -108,11 +108,13 @@ export function createApi(ctx: ApiContext): Hono {
   app.get("/api/deliveries", (c) => {
     const limit = Number(c.req.query("limit") ?? "50");
     const routeId = c.req.query("routeId");
+    const sourceDeliveryId = c.req.query("sourceDeliveryId");
     const status = c.req.query("status") as DeliveryStatus | undefined;
     const deliveries = ctx.stores.deliveries
       .list({
         limit: Number.isFinite(limit) ? limit : 50,
         ...(routeId ? { routeId } : {}),
+        ...(sourceDeliveryId ? { sourceDeliveryId } : {}),
         ...(status ? { status } : {}),
       })
       .map(publicDelivery);

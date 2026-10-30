@@ -92,7 +92,7 @@ export const RouteTargetSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-export const SandboxPolicySchema = z.enum(["read-only", "workspace-write"]);
+export const SandboxPolicySchema = z.enum(["read-only", "workspace-write", "user-config"]);
 
 function matchSchemaFor(source: "github" | "gmail" | "slack" | "webhook") {
   switch (source) {
@@ -131,6 +131,13 @@ export const RouteInputSchema = z
         code: "custom",
         path: ["sandbox"],
         message: "gmail routes are forced to read-only sandbox",
+      });
+    }
+    if (route.sandbox === "user-config" && route.source !== "webhook") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["sandbox"],
+        message: "user-config is opt-in for trusted webhook workflows only",
       });
     }
   })

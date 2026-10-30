@@ -58,6 +58,8 @@ export class CodexSdkAdapter implements AgentAdapter {
   }
 
   private threadOptions(opts: DeliveryOptions): ThreadOptions {
+    if (opts.sandbox === "user-config")
+      throw new PermanentError("user-config requires codex-app-server");
     return {
       sandboxMode: opts.sandbox,
       approvalPolicy: "never", // unattended: never block on approval prompts

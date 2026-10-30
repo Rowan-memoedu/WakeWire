@@ -61,6 +61,8 @@ export class CodexExecAdapter implements AgentAdapter {
     opts: DeliveryOptions,
     flags: { cd?: boolean } = {},
   ): { args: string[]; lastMessageFile: string } {
+    if (opts.sandbox === "user-config")
+      throw new PermanentError("user-config requires codex-app-server");
     const lastMessageFile = path.join(
       os.tmpdir(),
       `wakewire-last-message-${process.pid}-${Math.random().toString(36).slice(2)}.txt`,

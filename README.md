@@ -2,6 +2,8 @@
 
 Local workflow integration: [native SDK sessions](docs/workflow-sessions.md), used by KnowledgeClipper and AsyncWorkflow without changing their prompts or native protocol.
 
+Scheduled RemNote tasks: [marked-todo workflow](docs/remnote-todo.md) uses Windows Task Scheduler, signed local webhooks and persistent first-turn receipts. Installation does not dispatch existing tasks immediately.
+
 **Break the loop.** GitHub, Gmail, Slack — and anything with a webhook (Linear,
 Sentry, ClickUp, your CI) — pushed straight into your
 [Codex](https://developers.openai.com/codex) threads.

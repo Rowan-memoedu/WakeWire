@@ -118,9 +118,18 @@ enabling `workspace-write` on anything.
   app-server adapter's policy object).
 - Gmail: a label is required; you cannot watch a whole inbox.
 - Rate limit: 10 deliveries/minute per route, then coalescing into digest turns —
-  a hostile webhook flood becomes one summarizing turn, not a hundred agent runs.
+  existing-thread routes coalesce bursts; new-thread routes wait for budget and
+  retain one independent conversation per event.
 - wakewire never reads or writes Codex's internal SQLite state; it only uses
   documented CLI/SDK/app-server surfaces.
+
+The local maintenance fork also supports explicit `user-config` webhook routes
+for trusted workflows. Only the App Server adapter accepts this mode; it omits
+sandbox and approval overrides and inherits the operator's existing Codex config.
+It must not be used as a default for third-party content. Gmail remains read-only.
+App Server deliveries persist dispatch intent and acknowledged Thread/Turn IDs.
+Once a request may have taken effect, failures or daemon restarts require review
+instead of automatic mutation replay. See [RemNote tasks](docs/remnote-todo.md).
 
 ## Reporting
 

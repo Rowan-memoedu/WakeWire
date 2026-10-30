@@ -27,7 +27,8 @@ export interface QueueOptions {
 /**
  * Persistent per-thread FIFO. All state lives in SQLite (crash-only design);
  * the in-memory `inFlight` set only prevents concurrent sends to one thread
- * within this process, and `delivering` rows are reset to `queued` on boot.
+ * within this process. Requests whose dispatch began are retained for review
+ * after a crash; only requests not yet sent are returned to `queued`.
  */
 export class DeliveryQueue {
   private readonly ratePerMinute: number;
@@ -138,6 +139,11 @@ export class DeliveryQueue {
           continue;
         }
         if (!route.enabled) continue;
+        if (route.target.type === "new-thread") {
+          const since = new Date(this.now().getTime() - 60_000).toISOString();
+          const limit = route.rateLimitPerMinute ?? this.ratePerMinute;
+          if (this.stores.deliveries.countRecentAttempts(route.id, since) >= limit) continue;
+        }
         const key = threadKey(route);
         if (this.inFlight.has(key) || claimed.has(key)) continue; // strict per-thread FIFO
         claimed.add(key);
@@ -173,6 +179,8 @@ export class DeliveryQueue {
    * turn carried by the newest delivery.
    */
   private maybeCoalesce(route: Route, delivery: Delivery, ready: Delivery[]): Delivery {
+    // A new-thread route promises one independent conversation per event.
+    if (route.target.type === "new-thread") return delivery;
     const limit = route.rateLimitPerMinute ?? this.ratePerMinute;
     const windowStart = new Date(this.now().getTime() - 60_000).toISOString();
     const recent = this.stores.deliveries.countRecentAttempts(route.id, windowStart);
@@ -227,7 +235,12 @@ export class DeliveryQueue {
   }
 
   private async deliver(route: Route, delivery: Delivery, prompt: string) {
-    const opts = { sandbox: route.sandbox };
+    const opts = {
+      sandbox: route.sandbox,
+      onSending: () => this.stores.deliveries.markSending(delivery.id),
+      onAccepted: (result: { threadId: string; turnId?: string | undefined }) =>
+        this.stores.deliveries.markAccepted(delivery.id, result),
+    };
     if (route.target.type === "thread") {
       return this.adapter.deliverToThread(route.target.threadId, prompt, opts);
     }
@@ -243,6 +256,17 @@ export class DeliveryQueue {
 
   private handleFailure(route: Route, delivery: Delivery, err: unknown): void {
     const message = err instanceof Error ? err.message : String(err);
+    if (this.stores.deliveries.get(delivery.id)?.dispatchStarted) {
+      this.stores.deliveries.markFailed(
+        delivery.id,
+        `${message}; dispatch may already exist, automatic replay disabled`,
+      );
+      this.logger.error(
+        { route: route.name, delivery: delivery.id },
+        "dispatch needs review; identities preserved",
+      );
+      return;
+    }
     if (err instanceof PermanentError) {
       this.stores.deliveries.markFailed(delivery.id, message);
       this.logger.error(

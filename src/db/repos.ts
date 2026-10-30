@@ -30,6 +30,7 @@ export interface Delivery {
   coalescedInto: string | null;
   isReplay: boolean;
   updatedAt: string;
+  dispatchStarted: boolean;
 }
 
 export type SourceKind = "github" | "gmail" | "slack" | "webhook";
@@ -70,6 +71,7 @@ interface DeliveryRow {
   coalesced_into: string | null;
   is_replay: number;
   updated_at: string;
+  dispatch_started: number;
 }
 
 interface SourceRow {
@@ -238,7 +240,12 @@ export class DeliveryStore {
     return row.n;
   }
 
-  list(filter: { limit?: number; routeId?: string; status?: DeliveryStatus }): Delivery[] {
+  list(filter: {
+    limit?: number;
+    routeId?: string;
+    status?: DeliveryStatus;
+    sourceDeliveryId?: string;
+  }): Delivery[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (filter.routeId) {
@@ -249,6 +256,10 @@ export class DeliveryStore {
       clauses.push("status = ?");
       params.push(filter.status);
     }
+    if (filter.sourceDeliveryId) {
+      clauses.push("source_delivery_id = ? AND status <> 'skipped-duplicate' AND is_replay = 0");
+      params.push(filter.sourceDeliveryId);
+    }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.db
       .prepare(`SELECT * FROM deliveries ${where} ORDER BY received_at DESC LIMIT ?`)
@@ -258,6 +269,20 @@ export class DeliveryStore {
 
   markDelivering(id: string): void {
     this.update(id, { status: "delivering" });
+  }
+
+  markSending(id: string): void {
+    this.db
+      .prepare("UPDATE deliveries SET dispatch_started = 1, updated_at = ? WHERE id = ?")
+      .run(nowIso(), id);
+  }
+
+  markAccepted(id: string, result: { threadId: string; turnId?: string | undefined }): void {
+    this.db
+      .prepare(
+        `UPDATE deliveries SET thread_id = ?, turn_id = COALESCE(?, turn_id), updated_at = ? WHERE id = ?`,
+      )
+      .run(result.threadId, result.turnId ?? null, nowIso(), id);
   }
 
   markDelivered(id: string, result: { threadId: string; turnId?: string | undefined }): void {
@@ -311,8 +336,13 @@ export class DeliveryStore {
     return row.n;
   }
 
-  /** Crash recovery: anything stuck in 'delivering' from a previous run goes back to queued. */
+  /** Never replay a request whose side effect may already exist after a crash. */
   resetInFlight(): number {
+    this.db
+      .prepare(`UPDATE deliveries SET status = 'failed',
+      error = 'daemon restarted after dispatch began; inspect the recorded thread before retrying',
+      updated_at = ? WHERE status = 'delivering' AND dispatch_started = 1`)
+      .run(nowIso());
     return this.db
       .prepare(
         `UPDATE deliveries SET status = 'queued', updated_at = ? WHERE status = 'delivering'`,
@@ -344,6 +374,7 @@ function toDelivery(row: DeliveryRow): Delivery {
     coalescedInto: row.coalesced_into,
     isReplay: row.is_replay === 1,
     updatedAt: row.updated_at,
+    dispatchStarted: row.dispatch_started === 1,
   };
 }
 

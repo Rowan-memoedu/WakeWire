@@ -8,6 +8,7 @@ interface Session {
   args: string[];
   threadId: string;
   methods: string[];
+  requests: Array<{ method: string; params: Record<string, unknown> }>;
   complete(status?: string): void;
 }
 const harness = vi.hoisted(() => ({
@@ -23,6 +24,7 @@ vi.mock("./jsonrpc.js", async (importOriginal) => {
     released = false;
     threadId = `thread-${harness.sessions.length + 1}`;
     methods: string[] = [];
+    requests: Array<{ method: string; params: Record<string, unknown> }> = [];
     onNotification: ((method: string, params: unknown) => void) | null = null;
     onClose: ((error: Error) => void) | null = null;
     constructor(
@@ -46,6 +48,7 @@ vi.mock("./jsonrpc.js", async (importOriginal) => {
     notify() {}
     async request(method: string, params: Record<string, unknown>) {
       this.methods.push(method);
+      this.requests.push({ method, params });
       if (method === "thread/start" || method === "thread/resume") {
         if (typeof params.threadId === "string") this.threadId = params.threadId;
         return { thread: { id: this.threadId, status: { type: "idle" } } };
@@ -146,5 +149,37 @@ describe("private app-server ownership", () => {
     expect(harness.sessions[0]?.args).toEqual(["app-server", "proxy"]);
     expect(harness.sessions[0]?.alive).toBe(true);
     expect(harness.sessions[0]?.released).toBe(false);
+  });
+
+  it("reports creation and first-turn acceptance before the turn finishes", async () => {
+    harness.autoComplete = false;
+    const accepted = vi.fn();
+    const sending = vi.fn();
+    const result = adapter.startThread("marked task", {
+      ...options,
+      onSending: sending,
+      onAccepted: accepted,
+    });
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(2));
+    expect(accepted.mock.calls[0]?.[0]).toEqual({ threadId: "thread-1" });
+    expect(accepted.mock.calls[1]?.[0]).toEqual({ threadId: "thread-1", turnId: "turn-thread-1" });
+    expect(sending).toHaveBeenCalledTimes(2);
+    harness.sessions[0]?.complete();
+    await result;
+  });
+
+  it("inherits existing Codex settings only on an explicit user-config route", async () => {
+    await adapter.startThread("trusted local task", { sandbox: "user-config", cwd: "/workspace" });
+    const requests =
+      harness.sessions[0]?.requests.filter(
+        ({ method }) => method === "thread/start" || method === "turn/start",
+      ) ?? [];
+    expect(requests).toHaveLength(2);
+    for (const { params } of requests) {
+      expect(params).not.toHaveProperty("sandbox");
+      expect(params).not.toHaveProperty("sandboxPolicy");
+      expect(params).not.toHaveProperty("approvalPolicy");
+      expect(params).not.toHaveProperty("model");
+    }
   });
 });
