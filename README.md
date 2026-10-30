@@ -1,5 +1,7 @@
 # wakewire
 
+Local workflow integration: [native SDK sessions](docs/workflow-sessions.md), used by KnowledgeClipper and AsyncWorkflow without changing their prompts or native protocol.
+
 **Break the loop.** GitHub, Gmail, Slack — and anything with a webhook (Linear,
 Sentry, ClickUp, your CI) — pushed straight into your
 [Codex](https://developers.openai.com/codex) threads.

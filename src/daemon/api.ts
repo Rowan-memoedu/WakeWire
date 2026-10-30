@@ -15,9 +15,11 @@ import { WebhookMappingSchema } from "../sources/webhook/map.js";
 import { WebhookIngestSource } from "../sources/webhook/source.js";
 import { WebhookVerificationSchema } from "../sources/webhook/verify.js";
 import { VERSION } from "../version.js";
+import type { CodexSessionGateway } from "./codex-sessions.js";
 import type { SourceManager } from "./sources.js";
 
 export interface ApiContext {
+  sessions?: CodexSessionGateway;
   stores: Stores;
   queue: DeliveryQueue;
   sources: SourceManager;
@@ -54,6 +56,7 @@ export function createApi(ctx: ApiContext): Hono {
       startedAt: ctx.startedAt,
       adapter: { name: ctx.adapter.name, codexReachable: reachable },
       queueDepth: ctx.queue.queueDepth(),
+      workflowSessions: ctx.sessions?.snapshot() ?? { activeSessions: 0, clients: [] },
       sources: ctx.sources.statuses(),
       secretsBackend: ctx.secrets.backend,
     });

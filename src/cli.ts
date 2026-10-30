@@ -7,6 +7,7 @@ import { authGmail } from "./cli/auth-gmail.js";
 import { authImap } from "./cli/auth-imap.js";
 import { authSlack } from "./cli/auth-slack.js";
 import { authWebhook } from "./cli/auth-webhook.js";
+import { runCodexSession } from "./cli/codex-session.js";
 import { configGet, configList, configSet } from "./cli/config-cmd.js";
 import { installService, uninstallService } from "./cli/service.js";
 import { apiFetch, readDaemonState } from "./client.js";
@@ -201,6 +202,31 @@ function processAlive(pid: number): boolean {
     return false;
   }
 }
+
+program
+  .command("codex-session")
+  .description("Relay an existing official SDK session through the local WakeWire daemon")
+  .requiredOption("--client <name>", "knowledge_clipper | async_workflow")
+  .requiredOption("--codex <path>", "approved native Codex executable")
+  .option("--cwd <path>", "original working directory", process.cwd())
+  .option(
+    "--config <value>",
+    "native Codex config override",
+    (value, previous: string[]) => [...previous, value],
+    [],
+  )
+  .action(async (opts: { client: string; codex: string; cwd: string; config: string[] }) => {
+    if (opts.client !== "knowledge_clipper" && opts.client !== "async_workflow") {
+      throw new Error("Unknown workflow session client");
+    }
+    await runCodexSession({
+      protocolVersion: 1,
+      client: opts.client,
+      codexPath: opts.codex,
+      cwd: opts.cwd,
+      configOverrides: opts.config,
+    });
+  });
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : err);

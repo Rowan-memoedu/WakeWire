@@ -13,6 +13,8 @@ const KNOWN: Record<string, string> = {
     "shared-server mode: loopback ws:// URL (e.g. ws://127.0.0.1:4571) for live codex --remote viewing",
   [settingKeys.ratePerMinute]: "default deliveries/minute per route before digest coalescing (10)",
   [settingKeys.apiPort]: "management API port (0 = random)",
+  [settingKeys.sessionCodexPaths]:
+    "JSON array of approved native Codex runtimes for workflow sessions",
 };
 
 const SENSITIVE = new Set<string>([settingKeys.apiToken]);
@@ -51,6 +53,15 @@ export async function configSet(key: string, value: string): Promise<void> {
       console.error(`invalid adapter "${value}" — use codex-sdk | codex-app-server | codex-exec`);
       process.exitCode = 1;
       return;
+    }
+  }
+  if (key === settingKeys.sessionCodexPaths) {
+    try {
+      const paths: unknown = JSON.parse(value);
+      if (!Array.isArray(paths) || paths.some((p) => typeof p !== "string" || !p))
+        throw new Error();
+    } catch {
+      throw new Error("sessions.codexPaths must be a JSON array of non-empty executable paths");
     }
   }
   if (key === settingKeys.appServerListen && value !== "") {

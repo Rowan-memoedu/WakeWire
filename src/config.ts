@@ -16,6 +16,7 @@ export interface DaemonConfig {
   /** 0 = pick a random free port and record it in the state file. */
   apiPort: number;
   apiToken: string;
+  sessionCodexPaths: string[];
 }
 
 export const settingKeys = {
@@ -27,6 +28,7 @@ export const settingKeys = {
   ratePerMinute: "queue.ratePerMinute",
   apiPort: "api.port",
   apiToken: "api.token",
+  sessionCodexPaths: "sessions.codexPaths",
 } as const;
 
 export function loadConfig(settings: SettingsStore): DaemonConfig {
@@ -50,5 +52,8 @@ export function loadConfig(settings: SettingsStore): DaemonConfig {
     apiToken: settings.getOrCreate(settingKeys.apiToken, () =>
       crypto.randomBytes(32).toString("hex"),
     ),
+    sessionCodexPaths: z
+      .array(z.string().min(1))
+      .parse(JSON.parse(settings.get(settingKeys.sessionCodexPaths) ?? "[]")),
   };
 }

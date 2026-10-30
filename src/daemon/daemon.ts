@@ -13,6 +13,7 @@ import { createAdapter } from "../sinks/factory.js";
 import { prepareWorktree } from "../sinks/worktree.js";
 import { VERSION } from "../version.js";
 import { createApi } from "./api.js";
+import { CodexSessionGateway } from "./codex-sessions.js";
 import { SourceManager } from "./sources.js";
 
 export interface DaemonState {
@@ -29,6 +30,7 @@ export class Daemon {
   private server: Server | null = null;
   private adapter: import("../sinks/types.js").AgentAdapter | null = null;
   private db: ReturnType<typeof openDatabase> | null = null;
+  private sessions: CodexSessionGateway | null = null;
 
   constructor(private readonly logger: Logger) {}
 
@@ -64,6 +66,12 @@ export class Daemon {
     this.sources = sources;
 
     const startedAt = new Date().toISOString();
+    const sessions = new CodexSessionGateway(
+      config.apiToken,
+      config.sessionCodexPaths,
+      this.logger,
+    );
+    this.sessions = sessions;
     const api = createApi({
       stores,
       queue,
@@ -73,6 +81,7 @@ export class Daemon {
       config,
       logger: this.logger,
       startedAt,
+      sessions,
     });
 
     const port = await new Promise<number>((resolve) => {
@@ -81,6 +90,7 @@ export class Daemon {
         (info) => resolve(info.port),
       );
       this.server = server as Server;
+      sessions.attach(this.server);
     });
 
     const state: DaemonState = {
@@ -110,6 +120,7 @@ export class Daemon {
     // Kills adapter connections AND any shared app-server child it owns —
     // otherwise the hard exit below orphans the spawned server.
     this.adapter?.close?.();
+    await this.sessions?.close();
     await new Promise<void>((resolve) => {
       if (!this.server) return resolve();
       this.server.close(() => resolve());

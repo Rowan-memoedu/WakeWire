@@ -1,6 +1,6 @@
 {
   "name": "wakewire",
-  "version": "0.1.0-session-release.1",
+  "version": "0.1.0-workflow-bridge.1",
   "description": "Break the loop — GitHub, Gmail, Slack, and any webhook (Linear, Sentry, ClickUp) pushed straight into your local Codex threads, no polling.",
   "keywords": [
     "agent",
@@ -26,6 +26,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
+    "scripts",
     "dist",
     "plugin",
     "recipes",
