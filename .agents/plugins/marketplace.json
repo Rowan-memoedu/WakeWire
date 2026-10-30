@@ -1,0 +1,19 @@
+{
+  "name": "wakewire-marketplace",
+  "interface": {
+    "displayName": "WakeWire"
+  },
+  "plugins": [
+    {
+      "name": "wakewire",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

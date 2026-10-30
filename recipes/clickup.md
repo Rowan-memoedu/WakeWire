@@ -1,0 +1,59 @@
+# ClickUp
+
+ClickUp signs webhooks with HMAC-SHA256 (hex) of the raw body in the
+`X-Signature` header — but it **generates the secret itself** when you register
+the webhook, so the flow is: create the source, register the webhook via
+ClickUp's API, then store the secret ClickUp returned.
+
+## 1. Source
+
+```json
+wakewire_source_setup_webhook {
+  "name": "clickup",
+  "verification": { "kind": "hmac-sha256", "header": "x-signature" },
+  "mapping": {
+    "kind": "event",
+    "summary": "{{kind}} on task {{taskId}}",
+    "fields": {
+      "taskId": "task_id",
+      "historyStatus": "history_items.0.after.status",
+      "historyUser": "history_items.0.user.username",
+      "historyField": "history_items.0.field"
+    }
+  }
+}
+```
+
+No `deliveryId` mapping on purpose: the body's `webhook_id` is the webhook's
+own id (identical on every event — mapping it would dedup everything after the
+first delivery), and ClickUp's recommended idempotency key is the composite
+`webhook_id:history_items[0].id`, which the body-hash fallback approximates
+well since history item ids make each body unique. ClickUp payloads vary a lot
+by event type; capture mode is your friend here.
+
+## 2. Register the webhook (ClickUp API)
+
+```bash
+curl -X POST "https://api.clickup.com/api/v2/team/<team_id>/webhook" \
+  -H "Authorization: <your ClickUp API token>" \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint": "<webhookUrl from step 1>", "events": ["taskCreated", "taskUpdated", "taskCommentPosted", "taskAssigneeUpdated"]}'
+```
+
+The response contains `webhook.secret` — store it:
+
+```bash
+wakewire auth webhook --source webhook-clickup
+```
+
+## 3. Route
+
+```json
+wakewire_route_add {
+  "name": "clickup task events",
+  "source": "webhook",
+  "match": { "provider": "clickup" },
+  "target": { "type": "thread", "threadId": "<your thread>" },
+  "promptTemplate": "A ClickUp {{kind}} event arrived. Summarize what changed and whether it needs my attention."
+}
+```
