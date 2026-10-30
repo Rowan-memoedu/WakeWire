@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Logger } from "../logging.js";
+import { VERSION } from "../version.js";
 import { JsonRpcChild, type JsonRpcConnection, JsonRpcError, JsonRpcWs } from "./jsonrpc.js";
 import type { AgentAdapter, DeliveryOptions, DeliveryResult } from "./types.js";
 import { BusyError, PermanentError, UnreachableError } from "./types.js";
@@ -22,7 +23,7 @@ export interface CodexAppServerAdapterConfig {
   listenUrl?: string | undefined;
 }
 
-const CLIENT_INFO = { name: "wakewire", title: "WakeWire", version: "0.1.0" };
+const CLIENT_INFO = { name: "wakewire", title: "WakeWire", version: VERSION };
 
 interface ThreadResumeResponse {
   thread: { id: string; status?: { type: string } };
@@ -81,6 +82,8 @@ const TURN_COMPLETION_TIMEOUT_MS = 30 * 60_000;
  */
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly name = "codex-app-server";
+  private deliveryScoped = false;
+  private readonly privateSessions = new Set<CodexAppServerAdapter>();
   private connection: JsonRpcConnection | null = null;
   private initializing: Promise<JsonRpcConnection> | null = null;
   /** Child handle when we spawned the shared ws server ourselves. */
@@ -104,6 +107,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     prompt: string,
     opts: DeliveryOptions,
   ): Promise<DeliveryResult> {
+    if (this.needsPrivateSession()) {
+      return this.withPrivateSession((session) => session.deliverToThread(threadId, prompt, opts));
+    }
     const rpc = await this.connect();
     const resumed = await this.call<ThreadResumeResponse>(rpc, "thread/resume", { threadId });
     if (resumed.thread.status?.type === "active") {
@@ -113,6 +119,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async startThread(prompt: string, opts: DeliveryOptions): Promise<DeliveryResult> {
+    if (this.needsPrivateSession()) {
+      return this.withPrivateSession((session) => session.startThread(prompt, opts));
+    }
     const rpc = await this.connect();
     const started = await this.call<ThreadResumeResponse>(rpc, "thread/start", {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -138,6 +147,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     opts: DeliveryOptions,
   ): Promise<DeliveryResult> {
     const completion = this.awaitTurnCompletion(threadId);
+    // A rejected turn/start cancels this waiter before it can be awaited below.
+    // Keep that cancellation handled while preserving the original RPC error.
+    void completion.catch(() => {});
     let turnId: string;
     try {
       const started = await this.call<TurnStartResponse>(rpc, "turn/start", {
@@ -213,6 +225,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async probe(): Promise<boolean> {
+    if (this.needsPrivateSession()) {
+      return this.withPrivateSession((session) => session.probe());
+    }
     try {
       await this.connect();
       return true;
@@ -222,11 +237,48 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   close(): void {
+    for (const session of this.privateSessions) session.close();
     this.failAllWaiters(new UnreachableError("adapter closed"));
     this.connection?.stop();
     this.connection = null;
     this.sharedServer?.kill();
     this.sharedServer = null;
+  }
+
+  private needsPrivateSession(): boolean {
+    return (
+      !this.deliveryScoped && !this.config.listenUrl && this.resolveConnectionMode() === "spawn"
+    );
+  }
+
+  /**
+   * A private app-server owns the writer even after turn/completed. Unsubscribe
+   * has a server-side inactivity grace period, so end our owned process before
+   * reporting delivery success. Each delivery gets its own process: finishing
+   * one must never close another delivery's live connection. Shared/proxy
+   * servers retain their existing lifecycle and are never killed here.
+   */
+  private async withPrivateSession<T>(
+    operation: (session: CodexAppServerAdapter) => Promise<T>,
+  ): Promise<T> {
+    const session = new CodexAppServerAdapter(this.logger, {
+      ...this.config,
+      connection: "spawn",
+    });
+    session.deliveryScoped = true;
+    this.privateSessions.add(session);
+    try {
+      return await operation(session);
+    } finally {
+      try {
+        const rpc = session.connection;
+        if (rpc instanceof JsonRpcChild) await rpc.stopAndWait();
+      } finally {
+        session.close();
+        this.privateSessions.delete(session);
+      }
+      this.logger.info({ mode: "spawn" }, "released private app-server session");
+    }
   }
 
   private async connect(): Promise<JsonRpcConnection> {

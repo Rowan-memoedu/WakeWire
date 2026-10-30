@@ -1,0 +1,11 @@
+Private Codex App Server sessions now end after each delivery, while WakeWire keeps listening for new events. This patch applies when `sink.appServerConnection` is `spawn`, or when `auto` resolves to a private spawned process. Each delivery owns its own process, so releasing a finished thread cannot interrupt another delivery.
+
+The adapter waits for `turn/completed`, closes the owned process's stdin, and waits for process exit before returning the delivery result. If the process does not exit within five seconds, it terminates only that owned child and still waits for exit. Failed and interrupted turns use the same cleanup. A health probe also closes its private process. The daemon, persisted conversation, event source, and queue remain intact.
+
+An unsubscribe alone does not provide immediate handoff: the current [official App Server protocol](https://learn.chatgpt.com/docs/app-server) documents a 30-minute no-subscriber inactivity grace period. Ending a private process releases its writer without archiving, deleting, forking, or rewriting the thread.
+
+Proxy and shared WebSocket connections retain their existing behavior because their server may be used by other clients. This patch must never terminate a shared server on completion of one delivery. Use the private `spawn` configuration when immediate desktop takeover is required.
+
+Verification covers independent concurrent deliveries, sequential events, existing-thread identity, failure/interruption cleanup, rejected turn-start cleanup, health probes, proxy preservation, and actual graceful/forced exit of a subprocess. Run `npm run typecheck`, `npm test`, `npm run lint`, and `npm run build` before packaging. Live acceptance additionally requires signed webhook events, a continuously running daemon, official desktop history readback, and successful follow-up turns on the same thread IDs. Keep live acceptance material and credentials outside this repository.
+
+This is a local maintenance build based on upstream commit `0226b6ba03980fed5a0d0275c4dd2bbd7ea839e3`, versioned as `0.1.0-session-release.1`. The upstream MIT license remains in force. Installing the original upstream npm tarball restores the previous runtime without deleting any event or Codex history.

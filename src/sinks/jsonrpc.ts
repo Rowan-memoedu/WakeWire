@@ -141,6 +141,7 @@ abstract class JsonRpcPeer implements JsonRpcConnection {
 /** JSONL over a spawned child's stdio (`codex app-server` / `codex app-server proxy`). */
 export class JsonRpcChild extends JsonRpcPeer {
   private child: ChildProcessWithoutNullStreams | null = null;
+  private childClosed: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly command: string,
@@ -158,6 +159,7 @@ export class JsonRpcChild extends JsonRpcPeer {
     const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     this.exited = false;
+    this.childClosed = new Promise<void>((resolve) => child.once("close", () => resolve()));
 
     const rl = readline.createInterface({ input: child.stdout });
     rl.on("line", (line) => this.handleRaw(line));
@@ -176,6 +178,21 @@ export class JsonRpcChild extends JsonRpcPeer {
     this.child?.kill();
     this.child = null;
     this.exited = true;
+  }
+
+  /** Close stdin for a graceful shutdown and wait for the owned process to exit. */
+  async stopAndWait(graceMs = 5_000): Promise<void> {
+    const child = this.child;
+    if (!child) return this.childClosed;
+    this.exited = true;
+    child.stdin.end();
+    const force = setTimeout(() => child.kill(), graceMs);
+    try {
+      await this.childClosed;
+    } finally {
+      clearTimeout(force);
+      if (this.child === child) this.child = null;
+    }
   }
 
   protected override send(message: Record<string, unknown>): void {
