@@ -73,6 +73,9 @@ export class DeliveryQueue {
 
   /** Render the prompt for a matched event and persist it as a queued delivery. */
   enqueueEvent(route: Route, event: WakeEvent, opts: { isReplay?: boolean } = {}): Delivery | null {
+    if (route.target.type === "new-thread" && route.target.promptMode === "verbatim") {
+      throw new PermanentError("verbatim routes accept authenticated local prompts only");
+    }
     let prompt: string;
     try {
       prompt = this.renderPrompt(route, event);
@@ -105,6 +108,31 @@ export class DeliveryQueue {
       return null;
     }
     if (this.options.autoWake ?? true) this.wake();
+    return delivery;
+  }
+
+  /** The caller supplies the complete user message; no template, wrapper or truncation. */
+  enqueuePrompt(route: Route, sourceDeliveryId: string, prompt: string): Delivery | null {
+    if (
+      !route.enabled ||
+      route.target.type !== "new-thread" ||
+      route.target.promptMode !== "verbatim"
+    ) {
+      throw new PermanentError("route is not enabled for verbatim local prompts");
+    }
+    const delivery = this.stores.deliveries.enqueue({
+      routeId: route.id,
+      event: {
+        source: "webhook",
+        kind: "local.prompt",
+        deliveryId: sourceDeliveryId,
+        occurredAt: this.now().toISOString(),
+        summary: "local prompt",
+        payload: {},
+      },
+      renderedPrompt: prompt,
+    });
+    if (delivery && (this.options.autoWake ?? true)) this.wake();
     return delivery;
   }
 

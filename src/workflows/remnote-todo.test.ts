@@ -9,7 +9,6 @@ import {
   scanTodo,
   startedTitle,
   type TodoTask,
-  taskPrompt,
 } from "./remnote-todo.js";
 
 function fixture(nodes: RemNode[], pageSize = 2): RemNoteReader {
@@ -69,6 +68,11 @@ describe("RemNote marked-todo workflow", () => {
       ["new", "b"],
     ]);
     expect(scan.conflicts).toEqual([]);
+    expect(scan.tasks[0]?.prompt).toBe("- 独立任务\n  - 完整说明");
+    expect(scan.tasks[1]?.prompt).toBe(
+      "本次任务是下文母项的第 2 个子项及其下属内容，其他部分仅作背景。\n\n" +
+        "- 已开始：原任务\n  - 已完成兄弟内容\n  - 新增分支\n    - 新任务细节",
+    );
   });
 
   it("keeps overlapping markers unresolved and refuses broken pagination", async () => {
@@ -121,6 +125,7 @@ describe("RemNote marked-todo workflow", () => {
       contextRemId: "task",
       documentRemId: "doc",
       sourceDeliveryId: "stable",
+      prompt: "original",
     };
     expect(await acknowledgeStarted(remnote, task, accepted)).toBe("changed");
     expect(remnote.updateTitle).not.toHaveBeenCalled();
@@ -149,6 +154,7 @@ describe("RemNote marked-todo workflow", () => {
         contextRemId: "task",
         documentRemId: "doc",
         sourceDeliveryId: "stable",
+        prompt: "original",
       };
       const dispatcher = {
         receipt: vi.fn(async () => ({ ...accepted, status })),
@@ -170,12 +176,55 @@ describe("RemNote marked-todo workflow", () => {
     await expect(acknowledgeStarted(remnote, task, accepted)).rejects.toThrow("readback mismatch");
   });
 
-  it("only accepts leading single markers and keeps the task prompt within the route limit", () => {
+  it("only accepts leading single markers", () => {
     expect(["%task", "  % task", "**%bold**"].every(isMarked)).toBe(true);
     expect(["%%routine", "text % marker", "%", "ordinary", "**%%routine**"].some(isMarked)).toBe(
       false,
     );
-    expect(taskPrompt("root").length).toBeLessThanOrEqual(4000);
-    expect(taskPrompt("root")).toContain("直接推进");
+  });
+
+  it("mechanically preserves long source text, multiline nodes, definitions and visible references", async () => {
+    const longText = "原句不得摘要或截断。".repeat(1500);
+    const scan = await scanTodo(
+      fixture([
+        { remId: "mother", parentRemId: "doc", title: "%研究 RemNote 导出" },
+        { remId: "paragraph", parentRemId: "mother", title: longText },
+        {
+          remId: "term",
+          parentRemId: "mother",
+          title: "术语",
+          headline: "术语 :: 定义第一行\n定义第二行",
+        },
+        {
+          remId: "ref",
+          parentRemId: "term",
+          title: "参见 [[课程]]",
+          inlineRefs: [{ text: "课程", targetRemId: "opaque-rem-id" }],
+        },
+      ]),
+      "doc",
+    );
+    expect(scan.tasks[0]?.prompt).toBe(
+      `- 研究 RemNote 导出\n  - ${longText}\n  - 术语 :: 定义第一行\n    定义第二行\n    - 参见 课程`,
+    );
+    expect(scan.tasks[0]?.prompt).not.toContain("opaque-rem-id");
+    expect(scan.tasks[0]?.prompt).not.toContain("MCP");
+  });
+
+  it("locates a nested task without counting empty leaf placeholders", async () => {
+    const scan = await scanTodo(
+      fixture([
+        { remId: "mother", parentRemId: "doc", title: "上下文原文" },
+        { remId: "blank", parentRemId: "mother", title: "" },
+        { remId: "sibling", parentRemId: "mother", title: "同名事项" },
+        { remId: "selected", parentRemId: "mother", title: "%同名事项" },
+        { remId: "detail", parentRemId: "selected", title: "实际要做的具体部分" },
+      ]),
+      "doc",
+    );
+    expect(scan.tasks[0]?.prompt).toBe(
+      "本次任务是下文母项的第 2 个子项及其下属内容，其他部分仅作背景。\n\n" +
+        "- 上下文原文\n  - 同名事项\n  - 同名事项\n    - 实际要做的具体部分",
+    );
   });
 });

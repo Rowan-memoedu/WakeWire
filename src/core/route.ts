@@ -89,6 +89,8 @@ export const RouteTargetSchema = z.discriminatedUnion("type", [
     cwd: z.string().min(1),
     /** Create a fresh git worktree of cwd per delivery and run the thread there. */
     worktree: z.boolean().default(false),
+    /** Explicit local API prompts bypass event templates and envelopes. */
+    promptMode: z.enum(["event", "verbatim"]).optional(),
   }),
 ]);
 
@@ -120,6 +122,17 @@ export const RouteInputSchema = z
     enabled: z.boolean().default(true),
   })
   .superRefine((route, ctx) => {
+    if (
+      route.target.type === "new-thread" &&
+      route.target.promptMode === "verbatim" &&
+      (route.source !== "webhook" || route.promptTemplate)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target", "promptMode"],
+        message: "verbatim routes require local webhook identity and no prompt template",
+      });
+    }
     const parsed = matchSchemaFor(route.source).safeParse(route.match);
     if (!parsed.success) {
       for (const issue of parsed.error.issues) {

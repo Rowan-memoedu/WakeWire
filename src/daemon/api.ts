@@ -90,6 +90,36 @@ export function createApi(ctx: ApiContext): Hono {
     return c.json({ route, warnings }, 201);
   });
 
+  app.put("/api/routes/:id", async (c) => {
+    const parsed = RouteInputSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success)
+      return c.json({ error: "invalid route", issues: parsed.error.issues }, 400);
+    const route = ctx.stores.routes.update(c.req.param("id"), parsed.data);
+    return route ? c.json({ route }) : c.json({ error: "route not found" }, 404);
+  });
+
+  app.post("/api/routes/:id/prompts", async (c) => {
+    const parsed = z
+      .object({
+        sourceDeliveryId: z.string().min(1).max(200),
+        prompt: z.string().min(1).max(2_000_000),
+      })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid prompt delivery" }, 400);
+    const route = ctx.stores.routes.get(c.req.param("id"));
+    if (!route) return c.json({ error: "route not found" }, 404);
+    try {
+      const delivery = ctx.queue.enqueuePrompt(
+        route,
+        parsed.data.sourceDeliveryId,
+        parsed.data.prompt,
+      );
+      return c.json({ delivery: delivery ? publicDelivery(delivery) : null }, 202);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
   app.delete("/api/routes/:id", (c) => {
     const removed = ctx.stores.routes.remove(c.req.param("id"));
     return removed ? c.json({ ok: true }) : c.json({ error: "route not found" }, 404);
@@ -409,6 +439,19 @@ export function createApi(ctx: ApiContext): Hono {
   app.post("/api/sources/:id/restart", async (c) => {
     const ok = await ctx.sources.restart(c.req.param("id"));
     return ok ? c.json({ ok: true }) : c.json({ error: "source not found" }, 404);
+  });
+
+  app.post("/api/sources/:id/toggle", async (c) => {
+    const parsed = z
+      .object({ enabled: z.boolean() })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "body must be {enabled: boolean}" }, 400);
+    const id = c.req.param("id");
+    if (!ctx.stores.sources.setEnabled(id, parsed.data.enabled)) {
+      return c.json({ error: "source not found" }, 404);
+    }
+    await ctx.sources.restart(id);
+    return c.json({ ok: true });
   });
 
   app.delete("/api/sources/:id", async (c) => {

@@ -120,6 +120,26 @@ export class RouteStore {
     return row ? toRoute(row) : null;
   }
 
+  /** Change route configuration in place, preserving delivery identities and history. */
+  update(id: string, input: RouteInput): Route | null {
+    this.db
+      .prepare(`UPDATE routes SET name = ?, source_kind = ?, match_json = ?,
+      target_json = ?, prompt_template = ?, sandbox_policy = ?, rate_limit_per_minute = ?,
+      enabled = ? WHERE id = ?`)
+      .run(
+        input.name,
+        input.source,
+        JSON.stringify(input.match),
+        JSON.stringify(input.target),
+        input.promptTemplate ?? null,
+        input.sandbox,
+        input.rateLimitPerMinute ?? null,
+        input.enabled ? 1 : 0,
+        id,
+      );
+    return this.get(id);
+  }
+
   list(): Route[] {
     const rows = this.db.prepare("SELECT * FROM routes ORDER BY created_at").all() as RouteRow[];
     return rows.map(toRoute);

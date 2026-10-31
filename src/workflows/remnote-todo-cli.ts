@@ -4,11 +4,9 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import pino from "pino";
 import { z } from "zod";
-import { apiFetch, readDaemonState } from "../client.js";
+import { apiFetch } from "../client.js";
 import type { Route } from "../core/route.js";
-import { createSecretStore, secretNames } from "../secrets/store.js";
 import { VERSION } from "../version.js";
 import {
   acknowledgeStarted,
@@ -19,7 +17,6 @@ import {
   scanTodo,
   type TodoDispatcher,
   type TodoReceipt,
-  taskPrompt,
 } from "./remnote-todo.js";
 
 const ConfigSchema = z.object({
@@ -37,6 +34,7 @@ type Config = z.infer<typeof ConfigSchema>;
 const NodeSchema = z.object({
   remId: z.string().min(1),
   title: z.string(),
+  headline: z.string().optional(),
   parentRemId: z.string().optional(),
   inlineRefs: z.array(z.object({ targetRemId: z.string(), text: z.string() })).optional(),
   media: z.array(z.unknown()).optional(),
@@ -112,8 +110,8 @@ class RemNoteMcp implements RemNoteReader {
   }
 }
 
-async function api<T>(endpoint: string, body?: unknown): Promise<T> {
-  const result = await apiFetch<T>(endpoint, body === undefined ? {} : { method: "POST", body });
+async function api<T>(endpoint: string, body?: unknown, method = "POST"): Promise<T> {
+  const result = await apiFetch<T>(endpoint, body === undefined ? {} : { method, body });
   if (result.status < 200 || result.status >= 300) {
     throw new Error(`WakeWire API ${endpoint.split("?")[0]} returned HTTP ${result.status}`);
   }
@@ -133,35 +131,12 @@ async function verifyDaemon(): Promise<void> {
 
 async function setup(config: Config, configFile: string): Promise<void> {
   await verifyDaemon();
-  const source = await api<{ sourceId: string }>("/api/sources/webhook/setup", {
-    name: config.provider,
-    mode: "listen",
-    capture: 0,
-    verification: {
-      kind: "hmac-sha256",
-      header: "x-wakewire-signature",
-      prefix: "sha256=",
-      encoding: "hex",
-    },
-    mapping: {
-      deliveryId: "eventId",
-      kind: "eventType",
-      occurredAt: "occurredAt",
-      summary: "RemNote marked task",
-      fields: {
-        documentRemId: "documentRemId",
-        taskRemId: "taskRemId",
-        contextRemId: "contextRemId",
-      },
-    },
-  });
   const routeInput = {
     name: config.provider,
     source: "webhook",
-    match: { provider: config.provider, events: ["todo.marked"] },
-    target: { type: "new-thread", cwd: config.cwd, worktree: false },
+    match: { provider: config.provider, events: ["local.prompt"] },
+    target: { type: "new-thread", cwd: config.cwd, worktree: false, promptMode: "verbatim" },
     sandbox: "user-config",
-    promptTemplate: taskPrompt(config.documentRemId),
     enabled: true,
   };
   const existing = (await api<{ routes: Route[] }>("/api/routes")).routes.filter(
@@ -170,36 +145,36 @@ async function setup(config: Config, configFile: string): Promise<void> {
   if (existing.length > 1) throw new Error("duplicate workflow routes need review");
   let route = existing[0];
   if (route) {
-    for (const [key, expected] of Object.entries(routeInput)) {
-      if (JSON.stringify(route[key as keyof Route]) !== JSON.stringify(expected)) {
-        throw new Error(`existing workflow route differs at ${key}; no overwrite performed`);
-      }
+    if (
+      (config.routeId && config.routeId !== route.id) ||
+      route.source !== "webhook" ||
+      route.target.type !== "new-thread" ||
+      route.target.cwd !== config.cwd ||
+      route.target.worktree
+    ) {
+      throw new Error("existing route identity or workspace differs; no overwrite performed");
     }
+    route = (await api<{ route: Route }>(`/api/routes/${route.id}`, routeInput, "PUT")).route;
   } else {
     route = (await api<{ route: Route }>("/api/routes", routeInput)).route;
   }
-  fs.writeFileSync(
-    configFile,
-    `${JSON.stringify({ ...config, sourceId: source.sourceId, routeId: route.id }, null, 2)}\n`,
-    { mode: 0o600 },
-  );
+  if (config.sourceId) await api(`/api/sources/${config.sourceId}/toggle`, { enabled: false });
+  fs.writeFileSync(configFile, `${JSON.stringify({ ...config, routeId: route.id }, null, 2)}\n`, {
+    mode: 0o600,
+  });
   console.log(
     JSON.stringify({
       configured: true,
       routeId: route.id,
-      sourceId: source.sourceId,
+      promptMode: "verbatim",
       dispatched: 0,
     }),
   );
 }
 
 async function createDispatcher(config: Config): Promise<TodoDispatcher> {
-  const secrets = await createSecretStore(pino({ level: "silent" }));
-  const sourceId = config.sourceId;
   const routeId = config.routeId;
-  if (!sourceId || !routeId) throw new Error("run setup before scanning");
-  const secret = secrets.get(secretNames.webhookSecret(sourceId));
-  if (!secret) throw new Error("WakeWire signing secret unavailable");
+  if (!routeId) throw new Error("run setup before scanning");
   const route = (await api<{ routes: Route[] }>("/api/routes")).routes.find(
     (candidate) => candidate.id === routeId,
   );
@@ -209,7 +184,8 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
     route.target.worktree ||
     route.target.cwd !== config.cwd ||
     route.sandbox !== "user-config" ||
-    route.promptTemplate !== taskPrompt(config.documentRemId)
+    route.target.promptMode !== "verbatim" ||
+    route.promptTemplate !== null
   ) {
     throw new Error("workflow route was disabled or changed; refusing to dispatch");
   }
@@ -220,27 +196,10 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
       return result.deliveries[0] ?? null;
     },
     async enqueue(task) {
-      const state = readDaemonState();
-      if (!state) throw new Error("WakeWire daemon unavailable");
-      const body = JSON.stringify({
-        eventId: task.sourceDeliveryId,
-        eventType: "todo.marked",
-        occurredAt: new Date().toISOString(),
-        documentRemId: task.documentRemId,
-        taskRemId: task.taskRemId,
-        contextRemId: task.contextRemId,
+      await api(`/api/routes/${routeId}/prompts`, {
+        sourceDeliveryId: task.sourceDeliveryId,
+        prompt: task.prompt,
       });
-      const signature = crypto.createHmac("sha256", secret).update(body).digest("hex");
-      const response = await fetch(`http://127.0.0.1:${state.port}/ingress/webhook/${sourceId}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-wakewire-signature": `sha256=${signature}`,
-        },
-        body,
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!response.ok) throw new Error(`WakeWire ingress HTTP ${response.status}`);
     },
   };
 }
@@ -250,6 +209,7 @@ interface RunReport {
   finishedAt?: string;
   scanned: number;
   markedTasks: number;
+  prepared: Array<{ remId: string; promptSha256: string; characters: number }>;
   acknowledged: Array<{ remId: string; threadId: string; turnId: string }>;
   pending: string[];
   errors: Array<{ remId?: string; message: string }>;
@@ -260,6 +220,7 @@ async function run(config: Config, configFile: string): Promise<void> {
     startedAt: new Date().toISOString(),
     scanned: 0,
     markedTasks: 0,
+    prepared: [],
     acknowledged: [],
     pending: [],
     errors: [],
@@ -277,6 +238,11 @@ async function run(config: Config, configFile: string): Promise<void> {
     );
     report.scanned = scan.nodeCount;
     report.markedTasks = scan.tasks.length;
+    report.prepared = scan.tasks.map((task) => ({
+      remId: task.taskRemId,
+      promptSha256: crypto.createHash("sha256").update(task.prompt).digest("hex"),
+      characters: task.prompt.length,
+    }));
     report.errors.push(
       ...scan.conflicts.map((remId) => ({
         remId,

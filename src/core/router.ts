@@ -4,7 +4,11 @@ import type { GithubMatch, GmailMatch, Route, SlackMatch, WebhookMatch } from ".
 /** Returns the enabled routes whose match rules accept this event. */
 export function matchRoutes(routes: Route[], event: WakeEvent): Route[] {
   return routes.filter(
-    (route) => route.enabled && route.source === event.source && matches(route, event),
+    (route) =>
+      route.enabled &&
+      route.source === event.source &&
+      !(route.target.type === "new-thread" && route.target.promptMode === "verbatim") &&
+      matches(route, event),
   );
 }
 
