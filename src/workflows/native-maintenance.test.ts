@@ -37,8 +37,33 @@ describe("renamed repository submission", () => {
     });
     await expect(
       repositoryFromOrigin("git@github.com:owner/old-name.git", "owner/hub"),
-    ).rejects.toThrow("active private maintenance source");
+    ).rejects.toThrow("active maintenance source");
   });
+
+  it("accepts an existing public repository owned by the maintenance account", async () => {
+    vi.spyOn(GithubMaintenanceClient.prototype, "request").mockResolvedValue({
+      full_name: "owner/public-pages",
+      private: false,
+      archived: false,
+    });
+    await expect(
+      repositoryFromOrigin("https://github.com/owner/public-pages.git", "owner/hub"),
+    ).resolves.toBe("owner/public-pages");
+  });
+
+  it.each([true, false])(
+    "rejects an archived repository regardless of visibility (%s)",
+    async (isPrivate) => {
+      vi.spyOn(GithubMaintenanceClient.prototype, "request").mockResolvedValue({
+        full_name: "owner/archived",
+        private: isPrivate,
+        archived: true,
+      });
+      await expect(
+        repositoryFromOrigin("https://github.com/owner/archived.git", "owner/hub"),
+      ).rejects.toThrow("active maintenance source");
+    },
+  );
 });
 
 describe("concurrent maintenance receipts", () => {

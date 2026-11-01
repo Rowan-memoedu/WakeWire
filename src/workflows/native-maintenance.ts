@@ -102,8 +102,8 @@ export async function repositoryFromOrigin(
   const repo = await github.request<{ full_name: string; private: boolean; archived: boolean }>(
     `repos/${requested}`,
   );
-  if (!repo.private || repo.archived || repo.full_name?.split("/")[0]?.toLowerCase() !== owner)
-    throw new Error("repository origin does not resolve to an active private maintenance source");
+  if (repo.archived || repo.full_name?.split("/")[0]?.toLowerCase() !== owner)
+    throw new Error("repository origin does not resolve to an active maintenance source");
   return repo.full_name;
 }
 

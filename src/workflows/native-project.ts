@@ -25,8 +25,7 @@ export class NativeProjectRegistry {
 
   private async call(name: string, args: Record<string, unknown>): Promise<unknown> {
     if (this.injectedCall) return this.injectedCall(name, args);
-    if (!this.ownerThreadId)
-      throw new Error("native app-tools requires a caller Thread identity");
+    if (!this.ownerThreadId) throw new Error("native app-tools requires a caller Thread identity");
     if (!this.client) {
       const root = path.join(
         process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
