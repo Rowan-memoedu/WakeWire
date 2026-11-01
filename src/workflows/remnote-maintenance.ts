@@ -130,11 +130,15 @@ export async function writeFeedback(
   status: string,
   prUrl?: string,
 ): Promise<string> {
-  const title = `执行进度：${status}\n[Actions 运行](${receipt.runUrl})${prUrl ? `\n[PR](${prUrl})` : ""}`;
+  // The MCP title reader exposes visible text, not Markdown link destinations.
+  const title = `执行进度：${status}\nActions：${receipt.runUrl}${prUrl ? `\nPR：${prUrl}` : ""}`;
   let id = receipt.feedbackRemId;
   if (!id) {
     const matches = (await allChildren(remnote, receipt.taskRemId)).filter(
-      (n) => n.title.startsWith("执行进度：") && n.title.includes(receipt.runUrl ?? "\0"),
+      (n) =>
+        n.title.startsWith("执行进度：") &&
+        (n.title.includes(receipt.runUrl ?? "\0") ||
+          /^执行进度：[^\n]+\nActions 运行(?:\nPR)?$/u.test(n.title)),
     );
     if (matches.length > 1) throw new Error("multiple progress notes need review");
     id = matches[0]?.remId ?? (await remnote.create(receipt.taskRemId, title));
