@@ -6,6 +6,7 @@ import {
   isMarked,
   type RemNode,
   type RemNoteReader,
+  relocateStarted,
   scanTodo,
   startedTitle,
   type TodoTask,
@@ -14,6 +15,23 @@ import {
 function fixture(nodes: RemNode[], pageSize = 2): RemNoteReader {
   const map = new Map(nodes.map((node) => [node.remId, structuredClone(node)]));
   return {
+    async create(parentRemId, title) {
+      const remId = `created-${map.size}`;
+      map.set(remId, { remId, parentRemId, title });
+      return remId;
+    },
+    async move(remId, parentRemId, oldParentRemId, position = "last", siblingRemId) {
+      const node = map.get(remId);
+      if (!node || node.parentRemId !== oldParentRemId) throw new Error("stale parent");
+      map.delete(remId);
+      node.parentRemId = parentRemId;
+      const entries = [...map.entries()];
+      const index = entries.findIndex(([id]) => id === siblingRemId);
+      if (position === "last") entries.push([remId, node]);
+      else entries.splice(index + (position === "after" ? 1 : 0), 0, [remId, node]);
+      map.clear();
+      for (const [id, item] of entries) map.set(id, item);
+    },
     async children(parentRemId, cursor) {
       const children = [...map.values()].filter((node) => node.parentRemId === parentRemId);
       const index = Number(cursor ?? 0);
@@ -105,12 +123,12 @@ describe("RemNote marked-todo workflow", () => {
       title: "**%研究 [[同名]]** 与 $x^2$",
       inlineRefs: [{ text: "同名", targetRemId: "exact-target" }],
     };
-    const remnote = fixture([node]);
+    const remnote = fixture([node, { remId: "started", parentRemId: "doc", title: "已开始" }]);
     const task = (await scanTodo(remnote, "doc")).tasks[0] as TodoTask;
     expect(await acknowledgeStarted(remnote, task, accepted)).toBe("marked");
     expect(remnote.updateTitle).toHaveBeenCalledExactlyOnceWith(
       "task",
-      "**已开始：研究 [[id:exact-target]]** 与 $x^2$",
+      "**研究 [[id:exact-target]]** 与 $x^2$",
     );
     expect(await acknowledgeStarted(remnote, task, accepted)).toBe("already-marked");
     expect(eventIdFor("doc", "task")).toBe(task.sourceDeliveryId);
@@ -166,7 +184,10 @@ describe("RemNote marked-todo workflow", () => {
   );
 
   it("does not acknowledge a failed write or a mismatching readback", async () => {
-    const remnote = fixture([{ remId: "task", title: "%todo", parentRemId: "doc" }]);
+    const remnote = fixture([
+      { remId: "task", title: "%todo", parentRemId: "doc" },
+      { remId: "started", parentRemId: "doc", title: "已开始" },
+    ]);
     const task = (await scanTodo(remnote, "doc")).tasks[0] as TodoTask;
     remnote.updateTitle = async () => {
       throw new Error("write unavailable");
@@ -181,6 +202,48 @@ describe("RemNote marked-todo workflow", () => {
     expect(["%%routine", "text % marker", "%", "ordinary", "**%%routine**"].some(isMarked)).toBe(
       false,
     );
+  });
+
+  it("moves intact subtrees in order with shared empty separators and retries a failed title write", async () => {
+    const reader = fixture(
+      [
+        { remId: "bucket", parentRemId: "doc", title: "已开始" },
+        { remId: "existing-blank", parentRemId: "bucket", title: "" },
+        { remId: "a", parentRemId: "doc", title: "%First" },
+        { remId: "detail", parentRemId: "a", title: "Original detail" },
+        { remId: "b", parentRemId: "doc", title: "已开始：Second" },
+      ],
+      1,
+    );
+    const first = (await scanTodo(reader, "doc")).tasks[0] as TodoTask;
+    const update = reader.updateTitle;
+    reader.updateTitle = async () => {
+      throw new Error("temporary write failure");
+    };
+    await expect(acknowledgeStarted(reader, first, accepted)).rejects.toThrow(
+      "temporary write failure",
+    );
+    expect((await reader.read("a")).title).toBe("%First");
+    const retryScan = await scanTodo(reader, "doc");
+    expect(retryScan.tasks[0]?.prompt).toBe("- First\n  - Original detail");
+    reader.updateTitle = update;
+    await acknowledgeStarted(reader, first, accepted);
+    await relocateStarted(reader, "doc", await reader.read("b"));
+    const siblings: RemNode[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await reader.children("bucket", cursor);
+      siblings.push(...page.children);
+      cursor = page.hasMore ? page.nextCursor : undefined;
+    } while (cursor);
+    expect(siblings.map((n) => n.title)).toEqual(["", "First", "", "Second", ""]);
+    expect(await reader.read("detail")).toEqual({
+      remId: "detail",
+      parentRemId: "a",
+      title: "Original detail",
+    });
+    expect((await scanTodo(reader, "doc")).tasks).toEqual([]);
+    expect(await acknowledgeStarted(reader, first, accepted)).toBe("already-marked");
   });
 
   it("mechanically preserves long source text, multiline nodes, definitions and visible references", async () => {

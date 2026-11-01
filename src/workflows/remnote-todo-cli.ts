@@ -108,6 +108,33 @@ class RemNoteMcp implements RemNoteReader {
   async updateTitle(remId: string, title: string): Promise<void> {
     await this.call("remnote_update_note", { remId, title });
   }
+  async create(parentRemId: string, title: string): Promise<string> {
+    const result = z
+      .object({ remIds: z.array(z.string()).min(1) })
+      .parse(
+        await this.call("remnote_create_note", { parentId: parentRemId, title: title || " " }),
+      );
+    if (result.remIds.length !== 1) throw new Error("expected a single empty node");
+    const id = result.remIds[0] as string;
+    if (title === "") await this.updateTitle(id, "");
+    return id;
+  }
+  async move(
+    remId: string,
+    parentRemId: string,
+    oldParentRemId: string,
+    position: "last" | "before" | "after" = "last",
+    siblingRemId?: string,
+  ): Promise<void> {
+    await this.call("remnote_move_note", {
+      remId,
+      newParentRemId: parentRemId,
+      expectedOldParentRemId: oldParentRemId,
+      position,
+      dryRun: false,
+      ...(siblingRemId ? { siblingRemId } : {}),
+    });
+  }
 }
 
 async function api<T>(endpoint: string, body?: unknown, method = "POST"): Promise<T> {

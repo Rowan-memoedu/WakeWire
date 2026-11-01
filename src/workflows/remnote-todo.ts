@@ -19,6 +19,14 @@ export interface RemNoteReader {
   children(parentRemId: string, cursor?: string): Promise<RemPage>;
   read(remId: string): Promise<RemNode>;
   updateTitle(remId: string, title: string): Promise<void>;
+  create(parentRemId: string, title: string): Promise<string>;
+  move(
+    remId: string,
+    parentRemId: string,
+    oldParentRemId: string,
+    position?: "last" | "before" | "after",
+    siblingRemId?: string,
+  ): Promise<void>;
 }
 
 export interface TodoTask {
@@ -51,7 +59,87 @@ export function isMarked(title: string): boolean {
 }
 
 function displayStartedTitle(title: string): string {
-  return title.replace(MARKER, "$1已开始：");
+  return title.replace(MARKER, "$1");
+}
+
+const LEGACY_STARTED = /^(\s*(?:\*\*|__|~~|\*|_)*)已开始[：:]/u;
+
+function isTaskRoot(nodes: Map<string, RemNode>, node: RemNode, documentRemId: string): boolean {
+  const parent = nodes.get(node.parentRemId ?? "");
+  return (
+    node.parentRemId === documentRemId ||
+    (parent?.parentRemId === documentRemId && parent.title === "已开始")
+  );
+}
+
+async function allChildren(remnote: RemNoteReader, parent: string): Promise<RemNode[]> {
+  const result: RemNode[] = [];
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await remnote.children(parent, cursor);
+    result.push(...page.children);
+    if (!page.hasMore) break;
+    if (!page.nextCursor || cursors.has(page.nextCursor))
+      throw new Error("incomplete placement pagination");
+    cursor = page.nextCursor;
+    cursors.add(cursor);
+  } while (cursor);
+  return result;
+}
+
+/** Move the original subtree, then clear its marker only after placement has been verified. */
+export async function relocateStarted(
+  remnote: RemNoteReader,
+  documentRemId: string,
+  node: RemNode,
+): Promise<void> {
+  const buckets = (await allChildren(remnote, documentRemId)).filter((n) => n.title === "已开始");
+  if (buckets.length !== 1) throw new Error("expected one existing 已开始 node in the document");
+  const bucket = buckets[0] as RemNode;
+  const expected = node.title.replace(MARKER, "$1").replace(LEGACY_STARTED, "$1");
+  // Validate lossless title conversion before moving anything.
+  const writeTitle = startedTitle(node);
+  if (!node.parentRemId) throw new Error("task parent is missing");
+  if (node.parentRemId !== bucket.remId) {
+    const siblings = await allChildren(remnote, bucket.remId);
+    const last = siblings.at(-1);
+    const trailingBlank =
+      last?.title === "" && (await allChildren(remnote, last.remId)).length === 0;
+    await remnote.move(
+      node.remId,
+      bucket.remId,
+      node.parentRemId,
+      trailingBlank ? "before" : "last",
+      trailingBlank ? last.remId : undefined,
+    );
+  }
+  for (const position of ["before", "after"] as const) {
+    const siblings = await allChildren(remnote, bucket.remId);
+    const index = siblings.findIndex((n) => n.remId === node.remId);
+    if (index < 0) throw new Error("moved task is missing from 已开始");
+    const adjacent = siblings[index + (position === "before" ? -1 : 1)];
+    const blank =
+      adjacent &&
+      adjacent.title === "" &&
+      (await allChildren(remnote, adjacent.remId)).length === 0;
+    if (!blank) {
+      const id = await remnote.create(bucket.remId, "");
+      await remnote.move(id, bucket.remId, bucket.remId, position, node.remId);
+    }
+  }
+  const placed = await remnote.read(node.remId);
+  if (placed.parentRemId !== bucket.remId || placed.title !== node.title) {
+    throw new Error("task changed during placement; marker retained");
+  }
+  await remnote.updateTitle(node.remId, writeTitle);
+  const readback = await remnote.read(node.remId);
+  if (readback.parentRemId !== bucket.remId || readback.title !== expected) {
+    throw new Error("started placement readback mismatch");
+  }
+  if (JSON.stringify(readback.inlineRefs ?? []) !== JSON.stringify(node.inlineRefs ?? [])) {
+    throw new Error("reference readback mismatch after placement");
+  }
 }
 
 export function eventIdFor(documentRemId: string, taskRemId: string): string {
@@ -115,7 +203,9 @@ export async function scanTodo(
     .filter((node) => !conflicts.has(node.remId))
     .map((node) => ({
       taskRemId: node.remId,
-      contextRemId: node.parentRemId === documentRemId ? node.remId : (node.parentRemId as string),
+      contextRemId: isTaskRoot(nodes, node, documentRemId)
+        ? node.remId
+        : (node.parentRemId as string),
       documentRemId,
       sourceDeliveryId: eventIdFor(documentRemId, node.remId),
       title: node.title,
@@ -126,7 +216,8 @@ export async function scanTodo(
 
 /** Keep Markdown formatting and resolve reference tokens by exact ID, never by title search. */
 export function startedTitle(node: RemNode): string {
-  if (!isMarked(node.title)) throw new Error("dispatch marker is no longer present");
+  if (!isMarked(node.title) && !LEGACY_STARTED.test(node.title))
+    throw new Error("dispatch marker is no longer present");
   if (node.media?.length || /!\[|<img\b/i.test(node.title)) {
     throw new Error("title contains media; prefix update needs a lossless RichText operation");
   }
@@ -142,7 +233,7 @@ export function startedTitle(node: RemNode): string {
     if (ids?.size !== 1) throw new Error("ambiguous inline reference; title left unchanged");
     return `[[id:${[...ids][0]}]]`;
   });
-  return displayStartedTitle(title);
+  return displayStartedTitle(title).replace(LEGACY_STARTED, "$1");
 }
 
 /** Only a thread AND accepted first turn authorize the visible started marker. */
@@ -154,15 +245,16 @@ export async function acknowledgeStarted(
   if (!receipt.threadId || !receipt.turnId) throw new Error("first turn has not been acknowledged");
   const current = await remnote.read(task.taskRemId);
   const expected = displayStartedTitle(task.title);
-  if (current.title === expected) return "already-marked";
-  if (current.title !== task.title || !isMarked(current.title)) return "changed";
-  const writeTitle = startedTitle(current);
-  await remnote.updateTitle(task.taskRemId, writeTitle);
-  const readback = await remnote.read(task.taskRemId);
-  if (readback.title !== expected) throw new Error(`title readback mismatch for ${task.taskRemId}`);
-  if (JSON.stringify(readback.inlineRefs ?? []) !== JSON.stringify(current.inlineRefs ?? [])) {
-    throw new Error(`reference readback mismatch for ${task.taskRemId}`);
+  if (current.title === expected) {
+    const buckets = (await allChildren(remnote, task.documentRemId)).filter(
+      (n) => n.title === "已开始",
+    );
+    return buckets.length === 1 && current.parentRemId === buckets[0]?.remId
+      ? "already-marked"
+      : "changed";
   }
+  if (current.title !== task.title || !isMarked(current.title)) return "changed";
+  await relocateStarted(remnote, task.documentRemId, current);
   return "marked";
 }
 
@@ -180,7 +272,7 @@ export function renderTaskPrompt(
 ): string {
   const task = nodes.get(taskRemId);
   if (!task) throw new Error("task is missing from the completed source scan");
-  const topLevel = task.parentRemId === documentRemId;
+  const topLevel = isTaskRoot(nodes, task, documentRemId);
   const context = topLevel ? task : nodes.get(task.parentRemId ?? "");
   if (!context) throw new Error("task parent is missing from the completed source scan");
   const children = new Map<string, RemNode[]>();
