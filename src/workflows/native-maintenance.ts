@@ -18,7 +18,7 @@ import {
   type MaintenanceReceipt,
   type NativeCheck,
 } from "./maintenance-types.js";
-import { NativeProjectRegistry } from "./native-project.js";
+import { NativeProjectRegistry, nativeCallerThreadId } from "./native-project.js";
 
 export async function maintenanceApi<T>(
   endpoint: string,
@@ -86,6 +86,27 @@ export async function verifyNativeRoute(config: MaintenanceConfig): Promise<void
     throw new Error("ordinary native Thread route changed or is unavailable");
 }
 
+export async function repositoryFromOrigin(
+  remote: string,
+  hub: string,
+  github = new GithubMaintenanceClient(hub),
+): Promise<string> {
+  const matched =
+    /^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(remote);
+  const requested = matched?.[1];
+  const owner = hub.split("/")[0]?.toLowerCase();
+  if (!requested || requested.split("/")[0]?.toLowerCase() !== owner)
+    throw new Error("repository origin does not belong to this maintenance account");
+  // Git remotes may retain a repository's old name. GitHub's canonical name
+  // selects the existing check profile and the exact PR/result identity.
+  const repo = await github.request<{ full_name: string; private: boolean; archived: boolean }>(
+    `repos/${requested}`,
+  );
+  if (!repo.private || repo.archived || repo.full_name?.split("/")[0]?.toLowerCase() !== owner)
+    throw new Error("repository origin does not resolve to an active private maintenance source");
+  return repo.full_name;
+}
+
 export function nativePrompt(
   original: string,
   repository: string,
@@ -131,6 +152,7 @@ export async function ensureNativeDelivery(
     const entry = fileURLToPath(new URL("./native-maintenance-cli.js", import.meta.url));
     await maintenanceApi(`/api/routes/${routeId}/prompts`, {
       sourceDeliveryId,
+      nativeCallerThreadId: nativeCallerThreadId(),
       prompt: nativePrompt(
         delivery.renderedPrompt ?? "",
         binding.repository,

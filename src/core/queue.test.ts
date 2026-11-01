@@ -356,20 +356,21 @@ describe("DeliveryQueue", () => {
           worktree: false,
           appProjectId: "saved",
           appOwnerThreadId: "owner",
+          promptMode: "verbatim",
         },
       }),
     );
-    q.enqueueEvent(visible, makeEvent("d-visible"));
+    q.enqueuePrompt(visible, "d-visible", "original task", "active-executor");
     await q.tick();
     expect(adapter.calls).toHaveLength(0);
     expect(native.calls[0]?.opts).toMatchObject({
       cwd: "D:/work",
       appProjectId: "saved",
-      appOwnerThreadId: "owner",
+      appOwnerThreadId: "active-executor",
     });
     native.failWith = new PermanentError("native app unavailable");
     native.failTimes = 1;
-    q.enqueueEvent(visible, makeEvent("d-unavailable"));
+    q.enqueuePrompt(visible, "d-unavailable", "next task", "active-executor");
     await q.tick();
     expect(adapter.calls).toHaveLength(0);
     expect(stores.deliveries.list({ status: "failed" })).toHaveLength(1);

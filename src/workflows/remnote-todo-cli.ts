@@ -9,7 +9,7 @@ import { z } from "zod";
 import { apiFetch } from "../client.js";
 import type { Route } from "../core/route.js";
 import { VERSION } from "../version.js";
-import { NativeProjectRegistry } from "./native-project.js";
+import { NativeProjectRegistry, nativeCallerThreadId } from "./native-project.js";
 import {
   acknowledgeStarted,
   ensureQueued,
@@ -252,6 +252,7 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
       await api(`/api/routes/${routeId}/prompts`, {
         sourceDeliveryId: task.sourceDeliveryId,
         prompt: task.prompt,
+        ...(config.appProjectId ? { nativeCallerThreadId: nativeCallerThreadId() } : {}),
       });
     },
   };

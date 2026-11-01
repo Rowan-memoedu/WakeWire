@@ -108,6 +108,7 @@ export function createApi(ctx: ApiContext): Hono {
       .object({
         sourceDeliveryId: z.string().min(1).max(200),
         prompt: z.string().min(1).max(2_000_000),
+        nativeCallerThreadId: z.string().uuid().optional(),
       })
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "invalid prompt delivery" }, 400);
@@ -118,6 +119,7 @@ export function createApi(ctx: ApiContext): Hono {
         route,
         parsed.data.sourceDeliveryId,
         parsed.data.prompt,
+        parsed.data.nativeCallerThreadId,
       );
       return c.json({ delivery: delivery ? publicDelivery(delivery) : null }, 202);
     } catch (err) {

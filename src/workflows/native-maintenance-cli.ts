@@ -11,7 +11,12 @@ import {
   MaintenanceConfigSchema,
   type NativeCheck,
 } from "./maintenance-types.js";
-import { maintenanceApi, nativeCheckStatus, updateReceipt } from "./native-maintenance.js";
+import {
+  maintenanceApi,
+  nativeCheckStatus,
+  repositoryFromOrigin,
+  updateReceipt,
+} from "./native-maintenance.js";
 
 const execute = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -66,14 +71,7 @@ async function main(): Promise<void> {
         "submit requires a local repository, a concise change summary and optional --retry",
       );
     const remote = await git(repoPath, "remote", "get-url", "origin");
-    const matched =
-      /^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(remote);
-    const repository = matched?.[1];
-    if (
-      !repository ||
-      repository.split("/")[0]?.toLowerCase() !== config.hub.split("/")[0]?.toLowerCase()
-    )
-      throw new Error("repository origin does not belong to this maintenance account");
+    const repository = await repositoryFromOrigin(remote, config.hub, github);
     const branch = `codex/maintenance-${receipt.requestId}`;
     // The candidate ref may be prepared without switching the user's active checkout.
     const head = await git(repoPath, "rev-parse", `refs/heads/${branch}`);

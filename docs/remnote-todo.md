@@ -1,6 +1,6 @@
 # RemNote 待办定时分发
 
-Windows 计划任务每天北京时间 02:00 调用本流程。调度程序通过本地 RemNote MCP 完整扫描配置子树，机械提取行首单个 `%` 标记事项的原文，通过 WakeWire 经过认证的本地接口投放，再由 WakeWire 创建独立的真实 Codex Thread。`%%` 和未标记事项均不分发。
+Codex 原生计划任务每天北京时间 02:00，在已保存 Project 的 local 环境调用 `scripts/run-remnote-todo.ps1`。原生计划沿用用户的 Full access 默认权限；脚本保留执行器提供的 `CODEX_THREAD_ID`，每次投放把当次调用者身份连同原文交给 WakeWire。调度程序通过本地 RemNote MCP 完整扫描配置子树，机械提取行首单个 `%` 标记事项的原文，再由 WakeWire 创建独立的真实 Codex Thread。`%%` 和未标记事项均不分发。原 Windows `WakeWire - RemNote Todo 0200` 计划停用，避免重复调度。
 
 配置 `maintenanceConfigFile` 后，同一计划先投放已绑定项目的 GitHub Actions 维护请求；普通待办扫描排除该配置列出的 Document 子树。绑定和 PR 合并归档见 [项目维护](remnote-maintenance.md)。普通待办的原生 Thread 行为保持原有语义。
 
@@ -23,13 +23,12 @@ WakeWire 在应用返回 Thread ID、确认首轮已受理后立即保存原生 
 ```powershell
 node <installed-dist>/workflows/remnote-todo-cli.js setup <absolute-config.json>
 node <installed-dist>/workflows/remnote-todo-cli.js check <absolute-config.json>
-pwsh -NoProfile -File <installed-scripts>/install-remnote-todo-task.ps1 -Config <absolute-config.json>
 ```
 
-`setup` 和 `check` 均不读取清单内容、不发起任务；安装计划任务也不会立即运行。只有 `run` 或计划触发才消费标记。检查结果必须显示已安装版本与运行中的 daemon 一致。
+`setup` 和 `check` 均不读取清单内容、不发起任务。周期调度通过官方 `automation_update` 管理，使用保存的 local Project；不要再安装旧 Windows 扫描计划。只有 `run` 或计划触发才消费标记。检查结果必须显示已安装版本与运行中的 daemon 一致。
 
-需要用户登录 Windows、WakeWire 后台正常运行、RemNote 桥接已连接。计划任务尝试唤醒睡眠中的计算机，错过时间时在可用后补跑；关机期间不能执行。错误和确认结果保存在配置目录的 `last-run.json`，计划进程的退出码为非零表示需要检查；输入内容不会写入日志。
+需要用户登录 Windows、ChatGPT 桌面端中的 Codex 正在运行、计算机处于唤醒状态、WakeWire 后台正常运行、RemNote 桥接已连接。原生计划不保证唤醒睡眠中的计算机或补跑关机期间错过的时间。错误和确认结果保存在配置目录的 `last-run.json`，计划进程的退出码为非零表示需要检查；输入内容不会写入日志。
 
-本流程的本地路由显式使用 `target.promptMode: verbatim` 和 `sandbox: user-config`，将完整原文作为原生用户消息发送，让 App Server 沿用用户已有 Codex 权限配置和模型。事件入口不能向此路由投递；其他路由仍使用原有模板和事件信封，邮件仍强制只读。该工作流通过原生应用工具创建可见 Thread；其他 SDK 会话桥接沿用原 App Server。
+本流程的本地路由显式使用 `target.promptMode: verbatim` 和 `sandbox: user-config`，将完整原文作为原生用户消息发送。原生创建从当次正在运行的调用者继承权限；旧配置中的 `appOwnerThreadId` 仅保留用于历史回读，不再作为新投放的权限来源。WakeWire 在创建前核验当次调用者仍在运行；缺失执行器身份或调用者已退出时不创建，不静默使用旧调用者。原文不包含这些传输字段。事件入口不能向此路由投递；其他路由仍使用原有模板和事件信封，邮件仍强制只读。其他 SDK 会话桥接沿用原 App Server。
 
-暂停流程：禁用 `WakeWire - RemNote Todo 0200` 计划任务及对应 WakeWire route。不要删除投递历史，否则会丢失去重依据。不要手工 replay 未知结果或已确认受理的记录；先检查已有 Thread。
+暂停流程：暂停 Codex 原生计划任务及对应 WakeWire route。不要删除投递历史，否则会丢失去重依据。不要手工 replay 未知结果或已确认受理的记录；先检查已有 Thread。

@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { NativeProjectRegistry } from "./native-project.js";
+import { NativeProjectRegistry, nativeCallerThreadId } from "./native-project.js";
 
 describe("official app project registration", () => {
   it("recovers a background wait failure by reading the same accepted Thread", async () => {
     const calls: string[] = [];
     const accepted: unknown[] = [];
-    const registry = new NativeProjectRegistry(async (name) => {
+    const registry = new NativeProjectRegistry(async (name, args) => {
       calls.push(name);
+      if (name === "read_thread" && args.threadId === "executor")
+        return {
+          thread: { id: "executor", status: { type: "active" } },
+          turns: [{ id: "caller-turn", status: "inProgress" }],
+        };
       if (name === "list_projects")
         return { projects: [{ projectId: "saved", path: "D:/work", hostId: "local" }] };
       if (name === "create_thread") return { threadId: "visible", hostId: "local" };
@@ -16,14 +21,20 @@ describe("official app project registration", () => {
         thread: { id: "visible", status: { type: "idle" } },
         turns: [{ id: "accepted-turn", status: "completed" }],
       };
-    });
+    }, "executor");
     expect(
       await registry.startThread("原任务", "saved", "D:/work", {
         sandbox: "user-config",
         onAccepted: (value) => accepted.push(value),
       }),
     ).toEqual({ threadId: "visible", turnId: "accepted-turn" });
-    expect(calls).toEqual(["list_projects", "create_thread", "wait_threads", "read_thread"]);
+    expect(calls).toEqual([
+      "list_projects",
+      "read_thread",
+      "create_thread",
+      "wait_threads",
+      "read_thread",
+    ]);
     expect(accepted).toEqual([
       { threadId: "visible" },
       { threadId: "visible", turnId: "accepted-turn" },
@@ -39,6 +50,11 @@ describe("official app project registration", () => {
       calls.push({ name, args });
       if (name === "list_projects")
         return { projects: [{ projectId: "saved", path: "D:/work", hostId: "local" }] };
+      if (name === "read_thread")
+        return {
+          thread: { id: "executor", status: { type: "active" } },
+          turns: [{ id: "caller-turn", status: "inProgress" }],
+        };
       if (name === "create_thread") return { threadId: "visible", hostId: "local" };
       if (++polls > 1)
         await new Promise<void>((resolve) => {
@@ -52,7 +68,7 @@ describe("official app project registration", () => {
           },
         ],
       };
-    });
+    }, "executor");
     const result = registry.startThread("原始任务\n  - 完整内容", "saved", "D:/work", {
       sandbox: "user-config",
       onAccepted: (r) => accepted.push(r),
@@ -93,6 +109,30 @@ describe("official app project registration", () => {
       "list_threads",
       "list_threads",
     ]);
+  });
+
+  it("does not create from a stale saved owner when its permission context is unavailable", async () => {
+    const calls: string[] = [];
+    const registry = new NativeProjectRegistry(async (name) => {
+      calls.push(name);
+      if (name === "list_projects")
+        return { projects: [{ projectId: "saved", path: "D:/work", hostId: "local" }] };
+      return {
+        thread: { id: "old-owner", status: { type: "notLoaded" } },
+        turns: [{ id: "old-turn", status: "completed" }],
+      };
+    }, "old-owner");
+    await expect(
+      registry.startThread("original", "saved", "D:/work", { sandbox: "user-config" }),
+    ).rejects.toThrow("not executing");
+    expect(calls).toEqual(["list_projects", "read_thread"]);
+  });
+
+  it("uses the current executor identity and rejects an invocation without one", () => {
+    expect(nativeCallerThreadId({ CODEX_THREAD_ID: "80cf83c0-148b-4ec7-bfbe-e1dd8a47daa9" })).toBe(
+      "80cf83c0-148b-4ec7-bfbe-e1dd8a47daa9",
+    );
+    expect(() => nativeCallerThreadId({})).toThrow();
   });
   it("rejects a mismatched workspace before changing the app", async () => {
     const calls: string[] = [];

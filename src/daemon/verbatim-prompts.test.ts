@@ -59,6 +59,46 @@ function fixture() {
 }
 
 describe("verbatim local prompt delivery", () => {
+  it("requires and preserves the actual executor for native prompts instead of the saved owner", async () => {
+    const f = fixture();
+    try {
+      const created = await f.app.request("/api/routes", {
+        method: "POST",
+        headers: f.headers,
+        body: JSON.stringify({
+          ...f.input,
+          target: {
+            ...f.input.target,
+            appProjectId: "saved-project",
+            appOwnerThreadId: "stale-owner",
+          },
+        }),
+      });
+      const { route } = (await created.json()) as { route: Route };
+      const input = { sourceDeliveryId: "current-execution", prompt: "unchanged original" };
+      const missing = await f.app.request(`/api/routes/${route.id}/prompts`, {
+        method: "POST",
+        headers: f.headers,
+        body: JSON.stringify(input),
+      });
+      expect(missing.status).toBe(400);
+      expect(f.stores.deliveries.list({})).toHaveLength(0);
+      const caller = "b4f9d401-9061-4ba4-9c9a-8dcb777f2b3e";
+      const accepted = await f.app.request(`/api/routes/${route.id}/prompts`, {
+        method: "POST",
+        headers: f.headers,
+        body: JSON.stringify({ ...input, nativeCallerThreadId: caller }),
+      });
+      expect(accepted.status).toBe(202);
+      expect(f.stores.deliveries.list({})[0]).toMatchObject({
+        renderedPrompt: input.prompt,
+        event: { payload: { nativeCallerThreadId: caller } },
+      });
+    } finally {
+      f.db.close();
+    }
+  });
+
   it("authenticates, preserves the full prompt and deduplicates without an event envelope", async () => {
     const f = fixture();
     try {

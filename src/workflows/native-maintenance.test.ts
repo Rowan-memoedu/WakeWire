@@ -11,11 +11,35 @@ import {
 import {
   nativeProgress,
   nativePrompt,
+  repositoryFromOrigin,
   updateReceipt,
   validateNativeRun,
 } from "./native-maintenance.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("renamed repository submission", () => {
+  it("uses GitHub's canonical repository name for profiles and PR identity", async () => {
+    const request = vi
+      .spyOn(GithubMaintenanceClient.prototype, "request")
+      .mockResolvedValue({ full_name: "owner/current-name", private: true, archived: false });
+    await expect(
+      repositoryFromOrigin("https://github.com/owner/old-name.git", "owner/hub"),
+    ).resolves.toBe("owner/current-name");
+    expect(request).toHaveBeenCalledWith("repos/owner/old-name");
+  });
+
+  it("does not follow a redirected repository into a different account", async () => {
+    vi.spyOn(GithubMaintenanceClient.prototype, "request").mockResolvedValue({
+      full_name: "another/current-name",
+      private: true,
+      archived: false,
+    });
+    await expect(
+      repositoryFromOrigin("git@github.com:owner/old-name.git", "owner/hub"),
+    ).rejects.toThrow("active private maintenance source");
+  });
+});
 
 describe("concurrent maintenance receipts", () => {
   it("preserves an accepted run when reconciliation only updated progress", async () => {

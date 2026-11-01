@@ -117,7 +117,12 @@ export class DeliveryQueue {
   }
 
   /** The caller supplies the complete user message; no template, wrapper or truncation. */
-  enqueuePrompt(route: Route, sourceDeliveryId: string, prompt: string): Delivery | null {
+  enqueuePrompt(
+    route: Route,
+    sourceDeliveryId: string,
+    prompt: string,
+    nativeCallerThreadId?: string,
+  ): Delivery | null {
     if (
       !route.enabled ||
       route.target.type !== "new-thread" ||
@@ -125,6 +130,8 @@ export class DeliveryQueue {
     ) {
       throw new PermanentError("route is not enabled for verbatim local prompts");
     }
+    if (route.target.appProjectId && !nativeCallerThreadId)
+      throw new PermanentError("native prompts require the current executor Thread identity");
     const delivery = this.stores.deliveries.enqueue({
       routeId: route.id,
       event: {
@@ -133,7 +140,7 @@ export class DeliveryQueue {
         deliveryId: sourceDeliveryId,
         occurredAt: this.now().toISOString(),
         summary: "local prompt",
-        payload: {},
+        payload: nativeCallerThreadId ? { nativeCallerThreadId } : {},
       },
       renderedPrompt: prompt,
     });
@@ -288,12 +295,15 @@ export class DeliveryQueue {
     }
     let cwd = route.target.cwd;
     if (route.target.appProjectId) {
+      const caller = delivery.event.payload.nativeCallerThreadId;
+      if (typeof caller !== "string" || !caller)
+        throw new PermanentError("native delivery has no current executor Thread identity");
       const native = this.options.nativeAppAdapter ?? new CodexNativeAppAdapter();
       return native.startThread(prompt, {
         ...opts,
         cwd,
         appProjectId: route.target.appProjectId,
-        appOwnerThreadId: route.target.appOwnerThreadId,
+        appOwnerThreadId: caller,
       });
     }
     if (route.target.worktree) {

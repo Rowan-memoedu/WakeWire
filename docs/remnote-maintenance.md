@@ -22,7 +22,7 @@ node <installed-dist>/workflows/remnote-maintenance-cli.js reconcile <absolute-c
 
 `setup` 建立映射和两个归位节点，但不投放；`check` 核验版本、映射、仓库和文档；`scan` 只查看标记数量；只有 `run` 消费标记。`reconcile` 核对已登记请求，不读取新命令。Actions 自带令牌只读取维护仓库的运行状态，GitHub App 令牌只读取绑定及关联仓库的代码与 PR；不扩大现有 App 权限。
 
-`native` 配置复用普通待办的 `cwd`、`appProjectId`、`appOwnerThreadId` 和 `routeId`；每个 binding 保存入口仓库的 `localPath`。配置与 `native-requests` 都留在本机。Actions 状态令牌按实际关联仓库扩大其只读仓库集合，不增加 App 的权限种类。
+`native` 配置复用普通待办的 `cwd`、`appProjectId` 和 `routeId`；每个 binding 保存入口仓库的 `localPath`。新投放的调用者来自执行器当次提供的 `CODEX_THREAD_ID`，随原文通过同一投放接口传递；旧 `appOwnerThreadId` 仅用于历史回读。配置与 `native-requests` 都留在本机。Actions 状态令牌按实际关联仓库扩大其只读仓库集合，不增加 App 的权限种类。
 
 `retry-native <config> <task-rem-id>...` 只用于明确指定的旧失败任务：先核验旧运行已经 failure、没有 PR、正文未变，再切换为原生执行。旧 run ID 不覆盖。没有旧运行身份、结果未知或可能已发布的任务不会自动重投。`execution: actions` 保留旧流程兼容，不作为 native 失败时的替代执行路线。
 

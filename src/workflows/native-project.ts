@@ -9,6 +9,11 @@ import type { DeliveryOptions, DeliveryResult } from "../sinks/types.js";
 type Call = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 const normalized = (value: string) => path.resolve(value).toLowerCase();
 
+/** Supplied by an actual native executor, never recovered from a saved workflow owner. */
+export function nativeCallerThreadId(env: NodeJS.ProcessEnv = process.env): string {
+  return z.string().uuid().parse(env.CODEX_THREAD_ID);
+}
+
 /** Use the installed official app-tools MCP server; never edit application state ourselves. */
 export class NativeProjectRegistry {
   private client: Client | undefined;
@@ -21,7 +26,7 @@ export class NativeProjectRegistry {
   private async call(name: string, args: Record<string, unknown>): Promise<unknown> {
     if (this.injectedCall) return this.injectedCall(name, args);
     if (!this.ownerThreadId)
-      throw new Error("native app-tools requires the workflow owner's saved Thread identity");
+      throw new Error("native app-tools requires a caller Thread identity");
     if (!this.client) {
       const root = path.join(
         process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
@@ -192,6 +197,11 @@ export class NativeProjectRegistry {
     opts: DeliveryOptions,
   ): Promise<DeliveryResult> {
     await this.verifyProject(projectId, cwd);
+    if (!this.ownerThreadId)
+      throw new Error("native creation requires the current executor Thread");
+    const caller = await this.readThread(this.ownerThreadId);
+    if (caller.thread.status.type !== "active" || caller.latestTurn?.status !== "inProgress")
+      throw new Error("native caller is not executing; creation was not attempted");
     opts.onSending?.();
     const created = z.object({ threadId: z.string(), hostId: z.string().optional() }).parse(
       await this.call("create_thread", {
