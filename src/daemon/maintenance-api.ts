@@ -5,6 +5,7 @@ import type { Stores } from "../db/repos.js";
 import {
   type MaintenanceReceipt,
   maintenanceRequestId,
+  NativeCheckSchema,
   RemId,
 } from "../workflows/maintenance-types.js";
 
@@ -38,6 +39,11 @@ export function maintenanceRouteConflict(
 
 /** Uses the existing authenticated localhost API and delivery ledger; GitHub owns execution. */
 export function mountMaintenanceApi(app: Hono, stores: Stores): void {
+  app.get("/api/deliveries/:id/maintenance", (c) => {
+    const delivery = stores.deliveries.get(c.req.param("id"));
+    if (!delivery?.maintenance) return c.json({ error: "maintenance receipt missing" }, 404);
+    return c.json({ delivery });
+  });
   app.get("/api/routes/:id/maintenance", (c) => {
     const route = stores.routes.get(c.req.param("id"));
     if (route?.target.type !== "github-actions")
@@ -54,6 +60,7 @@ export function mountMaintenanceApi(app: Hono, stores: Stores): void {
         prompt: z.string().min(1),
         originalTitle: z.string().min(1),
         fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+        nativeRequested: z.boolean().optional(),
       })
       .safeParse(await c.req.json().catch(() => null));
     if (!input.success) return c.json({ error: "invalid maintenance request" }, 400);
@@ -63,7 +70,7 @@ export function mountMaintenanceApi(app: Hono, stores: Stores): void {
       return_run_details: true,
       inputs: { project: route.target.repository, task: input.data.prompt, request_id: requestId },
     };
-    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 65000)
+    if (!input.data.nativeRequested && Buffer.byteLength(JSON.stringify(payload), "utf8") > 65000)
       return c.json({ error: "command exceeds GitHub dispatch payload limit; not truncated" }, 413);
     const result = stores.deliveries.beginMaintenance(route.id, requestId, input.data.prompt, {
       revision: 0,
@@ -74,6 +81,9 @@ export function mountMaintenanceApi(app: Hono, stores: Stores): void {
       fingerprint: input.data.fingerprint,
       started: false,
       completed: false,
+      ...(input.data.nativeRequested
+        ? { nativeRequested: true, nativeChecks: [], nativeFinalized: false }
+        : {}),
     });
     return c.json(result, result.created ? 201 : 200);
   });
@@ -87,6 +97,12 @@ export function mountMaintenanceApi(app: Hono, stores: Stores): void {
         started: z.boolean().optional(),
         completed: z.boolean().optional(),
         lastStatus: z.string().max(2000).optional(),
+        nativeRequested: z.boolean().optional(),
+        nativeDeliveryId: z.string().uuid().optional(),
+        nativeThreadId: z.string().min(1).optional(),
+        nativeTurnId: z.string().min(1).optional(),
+        nativeFinalized: z.boolean().optional(),
+        nativeChecks: z.array(NativeCheckSchema).optional(),
       })
       .strict()
       .safeParse(await c.req.json().catch(() => null));
@@ -96,8 +112,23 @@ export function mountMaintenanceApi(app: Hono, stores: Stores): void {
     if (!delivery?.maintenance || route?.target.type !== "github-actions")
       return c.json({ error: "maintenance receipt missing" }, 404);
     const { revision, ...patch } = input.data;
-    if ((patch.started || patch.completed) && !(delivery.maintenance.runId || patch.runId))
+    if (
+      (patch.started || patch.completed) &&
+      !(
+        delivery.maintenance.runId ||
+        patch.runId ||
+        ((delivery.maintenance.nativeThreadId || patch.nativeThreadId) &&
+          (delivery.maintenance.nativeTurnId || patch.nativeTurnId))
+      )
+    )
       return c.json({ error: "no acknowledged Actions run" }, 409);
+    const hubOwner = route.target.hub.split("/")[0]?.toLowerCase();
+    if (
+      patch.nativeChecks?.some(
+        (check) => check.repository.split("/")[0]?.toLowerCase() !== hubOwner,
+      )
+    )
+      return c.json({ error: "related repository owner differs from the maintenance hub" }, 409);
     try {
       return c.json({
         delivery: stores.deliveries.updateMaintenance(delivery.id, revision, {

@@ -21,6 +21,13 @@ import {
   type MaintenanceReceipt,
 } from "./maintenance-types.js";
 import {
+  ensureNativeDelivery,
+  nativeProgress,
+  updateReceipt as patchReceipt,
+  verifyNativeRoute,
+} from "./native-maintenance.js";
+import { NativeProjectRegistry } from "./native-project.js";
+import {
   ensureBuckets,
   placeCompleted,
   placeStarted,
@@ -93,19 +100,6 @@ async function verifyRepositories(
   return bases;
 }
 
-async function patchReceipt(
-  delivery: Delivery,
-  patch: Partial<MaintenanceReceipt>,
-): Promise<Delivery> {
-  return (
-    await api<{ delivery: Delivery }>(
-      `/api/deliveries/${delivery.id}/maintenance`,
-      { revision: delivery.maintenance?.revision, ...patch },
-      "PATCH",
-    )
-  ).delivery;
-}
-
 async function setup(config: MaintenanceConfig, configFile: string): Promise<void> {
   await verifyRepositories(config, new GithubMaintenanceClient(), true);
   const routes = (await api<{ routes: Route[] }>("/api/routes")).routes;
@@ -133,6 +127,16 @@ async function setup(config: MaintenanceConfig, configFile: string): Promise<voi
     fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   }
   await verifyRoutes(config);
+  if (config.execution === "native") {
+    await verifyNativeRoute(config);
+    const native = config.native as NonNullable<MaintenanceConfig["native"]>;
+    const registry = new NativeProjectRegistry(undefined, native.appOwnerThreadId);
+    try {
+      await registry.verifyProject(native.appProjectId, native.cwd);
+    } finally {
+      await registry.close();
+    }
+  }
   const remnote = new RemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);
@@ -152,6 +156,7 @@ async function processBindings(
   mode: "run" | "reconcile" | "scan" | "check",
 ): Promise<void> {
   await verifyRoutes(config);
+  if (config.execution === "native") await verifyNativeRoute(config);
   const github = new GithubMaintenanceClient(config.hub);
   const bases = await verifyRepositories(config, github, mode === "run");
   const remnote = new RemNoteMcp();
@@ -209,10 +214,15 @@ async function processBindings(
                     originalTitle: task.title,
                     prompt: task.prompt,
                     fingerprint,
+                    ...(config.execution === "native" ? { nativeRequested: true } : {}),
                   },
                 );
                 if (!claim.created) continue;
                 let delivery = claim.delivery;
+                if (config.execution === "native") {
+                  await ensureNativeDelivery(config, configFile, binding, delivery);
+                  continue;
+                }
                 try {
                   const response = await github.request<{
                     workflow_run_id: number;
@@ -262,6 +272,43 @@ async function processBindings(
           let receipt = delivery.maintenance;
           if (!receipt || receipt.completed) continue;
           try {
+            if (receipt.nativeRequested) {
+              delivery = await ensureNativeDelivery(config, configFile, binding, delivery);
+              // Native creation is asynchronous. Briefly await the normal intake's acceptance.
+              for (
+                let attempt = 0;
+                !delivery.maintenance?.nativeTurnId && attempt < 15;
+                attempt++
+              ) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                delivery = await ensureNativeDelivery(config, configFile, binding, delivery);
+              }
+              receipt = delivery.maintenance as MaintenanceReceipt;
+              if (!receipt.started && receipt.nativeTurnId) {
+                await placeStarted(remnote, receipt, buckets.started);
+                delivery = await patchReceipt(delivery, { started: true });
+                receipt = delivery.maintenance as MaintenanceReceipt;
+              }
+              const progress = await nativeProgress(config, delivery);
+              const feedbackRemId = await writeFeedback(
+                remnote,
+                receipt,
+                progress.status,
+                undefined,
+                progress.links,
+              );
+              delivery = await patchReceipt(delivery, {
+                feedbackRemId,
+                lastStatus: progress.status,
+              });
+              receipt = delivery.maintenance as MaintenanceReceipt;
+              if (progress.complete) {
+                await placeCompleted(remnote, receipt, buckets.started, buckets.completed);
+                await patchReceipt(delivery, { completed: true });
+                report.completed.push(receipt.taskRemId);
+              }
+              continue;
+            }
             if (!receipt.runId || !receipt.runUrl)
               throw new Error("dispatch outcome unknown; retained without replay");
             if (!receipt.started) {
@@ -370,11 +417,11 @@ async function processBindings(
 }
 
 async function main(): Promise<void> {
-  const [mode, configFile] = process.argv.slice(2);
+  const [mode, configFile, ...taskRemIds] = process.argv.slice(2);
   if (
     !configFile ||
     !path.isAbsolute(configFile) ||
-    !["setup", "run", "reconcile", "scan", "check", "targets"].includes(mode ?? "")
+    !["setup", "run", "reconcile", "scan", "check", "targets", "retry-native"].includes(mode ?? "")
   )
     throw new Error(
       "usage: remnote-maintenance-cli setup|run|reconcile|scan|check|targets <absolute-config.json>",
@@ -384,8 +431,18 @@ async function main(): Promise<void> {
     throw new Error("maintenance data paths must be absolute");
   process.env.WAKEWIRE_HOME = config.wakewireHome;
   if (mode === "targets") {
+    const related: string[] = [];
+    for (const binding of config.bindings) {
+      if (!binding.routeId) continue;
+      const { deliveries } = await api<{ deliveries: Delivery[] }>(
+        `/api/routes/${binding.routeId}/maintenance`,
+      );
+      for (const delivery of deliveries)
+        for (const check of delivery.maintenance?.nativeChecks ?? [])
+          related.push(check.repository);
+    }
     console.log(
-      [...new Set([config.hub, ...config.bindings.map((b) => b.repository)])]
+      [...new Set([config.hub, ...config.bindings.map((b) => b.repository), ...related])]
         .map((r) => r.split("/")[1])
         .join(","),
     );
@@ -409,7 +466,74 @@ async function main(): Promise<void> {
   fs.closeSync(fd);
   try {
     if (mode === "setup") await setup(config, configFile);
-    else await processBindings(config, configFile, mode as "run" | "reconcile" | "scan" | "check");
+    else if (mode === "retry-native") {
+      if (config.execution !== "native" || !taskRemIds.length)
+        throw new Error("retry-native requires explicit source task IDs and native configuration");
+      await verifyRoutes(config);
+      await verifyNativeRoute(config);
+      const github = new GithubMaintenanceClient(config.hub);
+      await verifyRepositories(config, github, true);
+      const remnote = new RemNoteMcp();
+      const remaining = new Set(taskRemIds);
+      try {
+        await remnote.connect(config.mcpUrl);
+        for (const binding of config.bindings) {
+          const { deliveries } = await api<{ deliveries: Delivery[] }>(
+            `/api/routes/${binding.routeId}/maintenance`,
+          );
+          for (let delivery of deliveries) {
+            const receipt = delivery.maintenance;
+            if (!receipt || !remaining.has(receipt.taskRemId)) continue;
+            if (receipt.completed) throw new Error("completed work cannot be retried");
+            if (!receipt.nativeRequested) {
+              if (!receipt.runId) throw new Error("unknown legacy dispatch cannot be retried");
+              const run = await github.request<WorkflowRun>(
+                `repos/${config.hub}/actions/runs/${receipt.runId}`,
+              );
+              if (run.status !== "completed" || run.conclusion !== "failure")
+                throw new Error(
+                  "only explicitly failed legacy runs may migrate to native execution",
+                );
+              const report = JSON.parse(
+                fs.readFileSync(
+                  path.join(
+                    config.resultRoot,
+                    `${run.id}-${run.run_attempt}`,
+                    "reports",
+                    "result.json",
+                  ),
+                  "utf8",
+                ),
+              ) as MaintenanceResult;
+              if (
+                report.run !== receipt.runUrl ||
+                report.repository !== binding.repository ||
+                report.pullRequest
+              )
+                throw new Error("legacy result may have published work; review before retrying");
+              if (
+                (await taskFingerprint(remnote, receipt.taskRemId, receipt.feedbackRemId)) !==
+                receipt.fingerprint
+              )
+                throw new Error("source changed; do not retry a stale request");
+              delivery = await patchReceipt(delivery, {
+                nativeRequested: true,
+                nativeFinalized: false,
+                nativeChecks: [],
+              });
+            }
+            await ensureNativeDelivery(config, configFile, binding, delivery);
+            remaining.delete(receipt.taskRemId);
+          }
+        }
+      } finally {
+        await remnote.close();
+      }
+      if (remaining.size)
+        throw new Error("some requested source tasks have no maintenance receipt");
+      await processBindings(config, configFile, "reconcile");
+    } else
+      await processBindings(config, configFile, mode as "run" | "reconcile" | "scan" | "check");
   } finally {
     const current = JSON.parse(fs.readFileSync(lockFile, "utf8")) as { nonce: string };
     if (current.nonce === nonce) fs.unlinkSync(lockFile);

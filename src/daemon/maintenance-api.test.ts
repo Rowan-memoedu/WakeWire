@@ -65,6 +65,54 @@ function fixture() {
 }
 
 describe("Actions intake on the existing delivery ledger", () => {
+  it("tracks native acceptance and immutable related check histories without the old Actions prompt size limit", async () => {
+    const f = fixture();
+    try {
+      const { route } = (await (await f.post("/api/routes", f.input)).json()) as { route: Route };
+      const { delivery } = (await (
+        await f.post(`/api/routes/${route.id}/maintenance`, {
+          taskRemId: "native",
+          originalTitle: "%fix",
+          prompt: "完整原文".repeat(10000),
+          fingerprint: "b".repeat(64),
+          nativeRequested: true,
+        })
+      ).json()) as { delivery: Delivery };
+      const endpoint = `/api/deliveries/${delivery.id}/maintenance`;
+      expect(
+        (
+          await f.post(
+            endpoint,
+            { revision: 0, nativeThreadId: "thread", nativeTurnId: "turn", started: true },
+            "PATCH",
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (await f.post(endpoint, { revision: 1, nativeThreadId: "different" }, "PATCH")).status,
+      ).toBe(409);
+      const check = {
+        id: "00000000-0000-4000-8000-000000000001",
+        repository: "owner/dependency",
+        branch: "codex/test",
+        head: "a".repeat(40),
+        runId: 7,
+      };
+      expect((await f.post(endpoint, { revision: 1, nativeChecks: [check] }, "PATCH")).status).toBe(
+        200,
+      );
+      expect((await f.post(endpoint, { revision: 2, nativeChecks: [] }, "PATCH")).status).toBe(409);
+      expect(
+        (await f.post(endpoint, { revision: 2, nativeChecks: [{ ...check, runId: 8 }] }, "PATCH"))
+          .status,
+      ).toBe(409);
+      expect(
+        (await f.post(endpoint, { revision: 2, nativeRequested: false }, "PATCH")).status,
+      ).toBe(409);
+    } finally {
+      f.db.close();
+    }
+  });
   it("authenticates, reserves once, survives an unknown result without entering Codex, and keeps run identity", async () => {
     const f = fixture();
     try {

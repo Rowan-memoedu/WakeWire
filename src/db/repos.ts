@@ -231,6 +231,27 @@ export class DeliveryStore {
       throw new Error("stale maintenance receipt");
     if (prior.runId && patch.runId && prior.runId !== patch.runId)
       throw new Error("run identity is immutable");
+    for (const key of ["nativeDeliveryId", "nativeThreadId", "nativeTurnId"] as const)
+      if (prior[key] && patch[key] && prior[key] !== patch[key])
+        throw new Error("native identity is immutable");
+    if (prior.nativeRequested && patch.nativeRequested === false)
+      throw new Error("native dispatch cannot be reset");
+    if (patch.nativeChecks) {
+      if (new Set(patch.nativeChecks.map((c) => c.id)).size !== patch.nativeChecks.length)
+        throw new Error("duplicate native check identity");
+      for (const old of prior.nativeChecks ?? []) {
+        const current = patch.nativeChecks.find((c) => c.id === old.id);
+        if (
+          !current ||
+          current.repository !== old.repository ||
+          current.branch !== old.branch ||
+          current.head !== old.head ||
+          (old.runId && current.runId !== old.runId) ||
+          (old.runUrl && current.runUrl !== old.runUrl)
+        )
+          throw new Error("native check history is immutable");
+      }
+    }
     const next = { ...prior, ...patch, revision: prior.revision + 1 };
     if ((prior.completed && !next.completed) || (prior.started && !next.started))
       throw new Error("receipt cannot move backwards");
@@ -238,7 +259,12 @@ export class DeliveryStore {
       .prepare(
         "UPDATE deliveries SET maintenance_json = ?, status = ?, updated_at = ? WHERE id = ?",
       )
-      .run(JSON.stringify(next), next.runId ? "delivered" : "failed", nowIso(), id);
+      .run(
+        JSON.stringify(next),
+        next.runId || next.nativeThreadId ? "delivered" : "failed",
+        nowIso(),
+        id,
+      );
     return this.get(id) as Delivery;
   }
 

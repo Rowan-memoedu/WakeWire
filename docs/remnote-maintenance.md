@@ -4,9 +4,11 @@
 
 每天北京时间 02:00 的既有待办计划先投放项目维护，再处理普通待办。普通待办通过其 `maintenanceConfigFile` 字段排除绑定子树。行首单个 `%` 标记、原文导出、父项背景、重叠标记拒绝规则均复用原工作流；“已完成”子树不再消费。
 
-维护模块通过 WakeWire 已认证本地 API 原子记录发送意图，再调用官方 GitHub workflow dispatch，使用 `return_run_details: true` 取得准确 run ID。身份保存在原有 deliveries 表，既不创建 Codex 桌面 Thread，也不进入 Codex 队列。GitHub Actions 负责排队、隔离检出、现有 Codex CLI 订阅执行和草稿 PR。重复扫描不重复投放；HTTP 超时、掉线或进程退出后的未知结果保留原记录，禁止自动重发。
+当前配置使用 `execution: native`：维护模块在原有 deliveries 表记录任务，再复用普通待办的已认证原文投放入口、原生 `create_thread`、saved local Project 与 `sandbox: user-config`。应用负责可见 Thread 和完整用户配置，维护流程不设置模型、推理强度或额外权限，不增加离线、单仓库及工具白名单限制。绑定仓库为入口项目，必要的关联仓库也可处理。业务原文完整保留，前后仅补充入口仓库位置和 PR 交付方法。普通待办自身的原文规则不变。
 
-GitHub 受理后移动原 Rem 及子树到“已开始”，回读后移除 `%`。每项附一个执行进度节点及 Actions/PR 链接。GitHub Actions 的状态工作流在维护结束后与每 15 分钟核对已投放请求，不读取新命令。只有成功运行的精确结果报告、匹配仓库/分支/PR、相同 head SHA 已合并到目标默认分支时才归档。任务正文及子树在执行期间有改动时保留“已开始”，避免把新增需求当作完成。
+原生 Thread 将各仓库候选提交推送到同一请求对应的 `codex/maintenance-<request-id>` 分支，通过 `native-maintenance-cli submit` 发起 `native-maintenance.yml` 的独立检查。命令等待并返回检查结果，原 Thread 可据此继续修复、再次提交；检查通过后 Actions 创建或复用 PR。`finalize` 明确本次相关仓库的 PR 集合已经齐备。模型执行与会话历史仍由原生 Codex 管理，没有新的 Agent 队列或会话数据库。普通待办已有投放记录、旧 Actions 记录和未知结果均保留；重复扫描不另建 Thread，不盲目重发 GitHub mutation。
+
+原生 Thread 首轮受理后移动原 Rem 及子树到“已开始”，回读后移除 `%`。每项附一个执行进度节点及各仓库的 Actions/PR 链接。GitHub Actions 状态工作流在维护或检查结束后与每 15 分钟核对已投放请求，不读取新命令。只有完整 PR 集合已确认、每个仓库最新提交均通过检查、对应精确 head 的 PR 全部合并到目标默认分支时才归档。任务正文及子树在执行期间有改动时保留“已开始”，避免把新增需求当作完成。
 
 命令：
 
@@ -18,6 +20,10 @@ node <installed-dist>/workflows/remnote-maintenance-cli.js run <absolute-config.
 node <installed-dist>/workflows/remnote-maintenance-cli.js reconcile <absolute-config.json>
 ```
 
-`setup` 建立映射和两个归位节点，但不投放；`check` 核验版本、映射、仓库和文档；`scan` 只查看标记数量；只有 `run` 消费标记。`reconcile` 只核对旧运行。Actions 自带令牌只读取维护仓库的运行状态，GitHub App 令牌只读取绑定仓库的代码与 PR；不扩大现有 App 权限。
+`setup` 建立映射和两个归位节点，但不投放；`check` 核验版本、映射、仓库和文档；`scan` 只查看标记数量；只有 `run` 消费标记。`reconcile` 核对已登记请求，不读取新命令。Actions 自带令牌只读取维护仓库的运行状态，GitHub App 令牌只读取绑定及关联仓库的代码与 PR；不扩大现有 App 权限。
+
+`native` 配置复用普通待办的 `cwd`、`appProjectId`、`appOwnerThreadId` 和 `routeId`；每个 binding 保存入口仓库的 `localPath`。配置与 `native-requests` 都留在本机。Actions 状态令牌按实际关联仓库扩大其只读仓库集合，不增加 App 的权限种类。
+
+`retry-native <config> <task-rem-id>...` 只用于明确指定的旧失败任务：先核验旧运行已经 failure、没有 PR、正文未变，再切换为原生执行。旧 run ID 不覆盖。没有旧运行身份、结果未知或可能已发布的任务不会自动重投。`execution: actions` 保留旧流程兼容，不作为 native 失败时的替代执行路线。
 
 暂停某个映射时禁用对应 WakeWire route，并保留配置中的排除项与投放记录。恢复原版本时保留新增 receipt 列和映射数据，不删除去重记录；若取消项目分流，先核对未完成请求再移除普通待办的排除配置。

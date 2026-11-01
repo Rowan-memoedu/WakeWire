@@ -72,7 +72,8 @@ export async function placeStarted(
   receipt: MaintenanceReceipt,
   started: string,
 ): Promise<void> {
-  if (!receipt.runId) throw new Error("Actions has not acknowledged the request");
+  if (!receipt.runId && !(receipt.nativeThreadId && receipt.nativeTurnId))
+    throw new Error("execution has not acknowledged the request");
   if (
     (await taskFingerprint(remnote, receipt.taskRemId, receipt.feedbackRemId)) !==
     receipt.fingerprint
@@ -95,7 +96,8 @@ export async function placeCompleted(
   started: string,
   completed: string,
 ): Promise<void> {
-  if (!receipt.started || !receipt.runId) throw new Error("unacknowledged task cannot complete");
+  if (!receipt.started || (!receipt.runId && !(receipt.nativeThreadId && receipt.nativeTurnId)))
+    throw new Error("unacknowledged task cannot complete");
   const node = await remnote.read(receipt.taskRemId);
   if (![started, completed].includes(node.parentRemId ?? ""))
     throw new Error("task was moved by the user; left in place");
@@ -129,15 +131,19 @@ export async function writeFeedback(
   receipt: MaintenanceReceipt,
   status: string,
   prUrl?: string,
+  links?: string[],
 ): Promise<string> {
   // The MCP title reader exposes visible text, not Markdown link destinations.
-  const title = `执行进度：${status}\nActions：${receipt.runUrl}${prUrl ? `\nPR：${prUrl}` : ""}`;
+  const title = links
+    ? [`执行进度：${status}`, ...links].join("\n")
+    : `执行进度：${status}\nActions：${receipt.runUrl}${prUrl ? `\nPR：${prUrl}` : ""}`;
   let id = receipt.feedbackRemId;
   if (!id) {
     const matches = (await allChildren(remnote, receipt.taskRemId)).filter(
       (n) =>
         n.title.startsWith("执行进度：") &&
-        (n.title.includes(receipt.runUrl ?? "\0") ||
+        (n.title === title ||
+          n.title.includes(receipt.runUrl ?? "\0") ||
           /^执行进度：[^\n]+\nActions 运行(?:\nPR)?$/u.test(n.title)),
     );
     if (matches.length > 1) throw new Error("multiple progress notes need review");
