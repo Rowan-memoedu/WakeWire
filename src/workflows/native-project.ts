@@ -161,6 +161,29 @@ export class NativeProjectRegistry {
     await this.client?.close();
   }
 
+  /** Read the existing app-owned Thread when no live caller turn can own a wait. */
+  async readThread(threadId: string) {
+    const snapshot = z
+      .object({
+        thread: z.object({
+          id: z.string(),
+          status: z.object({ type: z.string(), activeFlags: z.array(z.string()).optional() }),
+        }),
+        turns: z.array(z.object({ id: z.string(), status: z.string() })),
+      })
+      .parse(
+        await this.call("read_thread", {
+          threadId,
+          hostId: "local",
+          turnLimit: 1,
+          includeOutputs: false,
+          maxOutputCharsPerItem: 100,
+        }),
+      );
+    if (snapshot.thread.id !== threadId) throw new Error("native Thread readback identity differs");
+    return { thread: snapshot.thread, latestTurn: snapshot.turns[0] };
+  }
+
   /** Let the application's native create_thread tool own visibility and execution. */
   async startThread(
     prompt: string,
@@ -182,8 +205,25 @@ export class NativeProjectRegistry {
     opts.onAccepted?.({ threadId });
     let turnId: string | undefined;
     let cursor: string | undefined;
+    let useRead = false;
     const deadline = Date.now() + 60 * 60_000;
     while (Date.now() < deadline) {
+      let raw: unknown;
+      if (!useRead) {
+        try {
+          raw = await this.call("wait_threads", {
+            targets: [{ threadId, hostId: "local", ...(cursor ? { afterCursor: cursor } : {}) }],
+            timeoutMs: turnId ? 30_000 : 0,
+          });
+        } catch (error) {
+          // Some app builds reject waits from a saved workflow owner context.
+          // Read the same native Thread; never repeat create_thread or construct
+          // another execution path.
+          if ((error as { code?: number }).code !== -32000) throw error;
+          useRead = true;
+        }
+      }
+      if (useRead) raw = { polls: [await this.readThread(threadId)] };
       const snapshot = z
         .object({
           polls: z
@@ -196,12 +236,7 @@ export class NativeProjectRegistry {
             .optional(),
           errors: z.array(z.unknown()).optional(),
         })
-        .parse(
-          await this.call("wait_threads", {
-            targets: [{ threadId, hostId: "local", ...(cursor ? { afterCursor: cursor } : {}) }],
-            timeoutMs: turnId ? 30_000 : 0,
-          }),
-        );
+        .parse(raw);
       if (snapshot.errors?.length)
         throw new Error("native thread monitoring failed; identity retained");
       const poll = snapshot.polls?.[0];
@@ -217,8 +252,8 @@ export class NativeProjectRegistry {
           throw new Error(`native turn ${turn.status}; identity retained`);
       }
       // Empty/inactive snapshots can return immediately; avoid a busy loop.
-      if (!turnId || turn?.status !== "inProgress")
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (useRead || !turnId || turn?.status !== "inProgress")
+        await new Promise((resolve) => setTimeout(resolve, useRead && turnId ? 30_000 : 1000));
     }
     throw new Error("native turn monitoring timed out; identity retained");
   }

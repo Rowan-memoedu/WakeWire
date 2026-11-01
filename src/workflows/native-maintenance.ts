@@ -18,6 +18,7 @@ import {
   type MaintenanceReceipt,
   type NativeCheck,
 } from "./maintenance-types.js";
+import { NativeProjectRegistry } from "./native-project.js";
 
 export async function maintenanceApi<T>(
   endpoint: string,
@@ -93,7 +94,7 @@ export function nativePrompt(
   requestFile: string,
   entry: string,
 ): string {
-  return `维护 ${repository}，本地源码在 ${localPath}。按普通本地 Codex Thread 的配置、权限及已有协作约定完成任务；需要处理关联项目时一并完成。\n\n${original}\n\n本次交付接入已有 GitHub Actions 与 RemNote 进度：\n将本次各仓库的变更提交并推送到各自的 codex/maintenance-${requestId} 分支；这只是本次 PR 的关联分支，不改变你的工具或访问权限。对每个改动仓库运行：\nnode "${entry}" submit "${requestFile}" "该仓库的本地绝对路径" "简洁说明具体修复及行为变化"\n该命令运行 Actions 独立检查，通过后创建或复用 PR，并返回检查结果。依据检查反馈继续修复；需要重新检查相同提交时可在命令末尾加 --retry。全部相关仓库的提交和检查完成后运行：\nnode "${entry}" finalize "${requestFile}"\n同一请求的所有相关 PR 合并后，原 RemNote 任务会自动归档。`;
+  return `维护 ${repository}，本地源码在 ${localPath}。用户已明确要求按普通本地 Codex Thread 使用 Full access 全部权限，不添加额外执行约束；沿用已有协作约定，需要处理关联项目时一并完成。\n\n${original}\n\n本次交付接入已有 GitHub Actions 与 RemNote 进度：\n将本次各仓库的变更提交并推送到各自的 codex/maintenance-${requestId} 分支。对每个改动仓库运行：\nnode "${entry}" submit "${requestFile}" "该仓库的本地绝对路径" "简洁说明具体修复及行为变化"\n该命令运行 Actions 独立检查，通过后创建或复用 PR，并返回检查结果。依据检查反馈继续修复；需要重新检查相同提交时可在命令末尾加 --retry。全部相关仓库的提交和检查完成后运行：\nnode "${entry}" finalize "${requestFile}"\n同一请求的所有相关 PR 合并后，原 RemNote 任务会自动归档。`;
 }
 
 /** The ordinary authenticated prompt intake owns native create_thread and its no-replay receipts. */
@@ -146,6 +147,15 @@ export async function ensureNativeDelivery(
   if (!receipt.nativeDeliveryId) patch.nativeDeliveryId = native.id;
   if (native.threadId && !receipt.nativeThreadId) patch.nativeThreadId = native.threadId;
   if (native.turnId && !receipt.nativeTurnId) patch.nativeTurnId = native.turnId;
+  if (native.threadId && !native.turnId && !receipt.nativeTurnId && native.status === "failed") {
+    const registry = new NativeProjectRegistry(undefined, config.native.appOwnerThreadId);
+    try {
+      const snapshot = await registry.readThread(native.threadId);
+      if (snapshot.latestTurn) patch.nativeTurnId = snapshot.latestTurn.id;
+    } finally {
+      await registry.close();
+    }
+  }
   if (Object.keys(patch).length) delivery = await updateReceipt(delivery, patch);
   return delivery;
 }
@@ -259,7 +269,10 @@ export async function nativeProgress(config: MaintenanceConfig, delivery: Delive
     const result = (await maintenanceApi<{ deliveries: Delivery[] }>(`/api/deliveries?${query}`))
       .deliveries[0];
     if (result?.status === "delivered") status = "本地 Thread 本轮已结束，尚未完成 PR 交付";
-    if (result?.status === "failed") status = "本地 Thread 需要关注，保留已有身份";
+    if (result?.status === "failed")
+      status = receipt.nativeTurnId
+        ? "本地 Thread 已接收，进度见原生 Thread"
+        : "本地 Thread 需要关注，保留已有身份";
   }
   return { status, links, complete };
 }

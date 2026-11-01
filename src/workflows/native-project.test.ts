@@ -2,6 +2,34 @@ import { describe, expect, it, vi } from "vitest";
 import { NativeProjectRegistry } from "./native-project.js";
 
 describe("official app project registration", () => {
+  it("recovers a background wait failure by reading the same accepted Thread", async () => {
+    const calls: string[] = [];
+    const accepted: unknown[] = [];
+    const registry = new NativeProjectRegistry(async (name) => {
+      calls.push(name);
+      if (name === "list_projects")
+        return { projects: [{ projectId: "saved", path: "D:/work", hostId: "local" }] };
+      if (name === "create_thread") return { threadId: "visible", hostId: "local" };
+      if (name === "wait_threads")
+        throw Object.assign(new Error("app request failed"), { code: -32000 });
+      return {
+        thread: { id: "visible", status: { type: "idle" } },
+        turns: [{ id: "accepted-turn", status: "completed" }],
+      };
+    });
+    expect(
+      await registry.startThread("原任务", "saved", "D:/work", {
+        sandbox: "user-config",
+        onAccepted: (value) => accepted.push(value),
+      }),
+    ).toEqual({ threadId: "visible", turnId: "accepted-turn" });
+    expect(calls).toEqual(["list_projects", "create_thread", "wait_threads", "read_thread"]);
+    expect(accepted).toEqual([
+      { threadId: "visible" },
+      { threadId: "visible", turnId: "accepted-turn" },
+    ]);
+  });
+
   it("uses the native visible project create tool with the exact original prompt and accepted turn receipts", async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const accepted: unknown[] = [];
