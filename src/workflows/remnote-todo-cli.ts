@@ -8,6 +8,7 @@ import { z } from "zod";
 import { apiFetch } from "../client.js";
 import type { Route } from "../core/route.js";
 import { VERSION } from "../version.js";
+import { NativeProjectRegistry } from "./native-project.js";
 import {
   acknowledgeStarted,
   ensureQueued,
@@ -27,6 +28,8 @@ const ConfigSchema = z.object({
   provider: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,39}$/),
   sourceId: z.string().optional(),
   routeId: z.string().optional(),
+  appProjectId: z.string().optional(),
+  appOwnerThreadId: z.string().optional(),
   waitMinutes: z.number().int().min(1).max(1380).default(1320),
 });
 type Config = z.infer<typeof ConfigSchema>;
@@ -158,11 +161,28 @@ async function verifyDaemon(): Promise<void> {
 
 async function setup(config: Config, configFile: string): Promise<void> {
   await verifyDaemon();
+  if (config.appProjectId) {
+    const registry = new NativeProjectRegistry(undefined, config.appOwnerThreadId);
+    try {
+      await registry.verifyProject(config.appProjectId, config.cwd);
+    } finally {
+      await registry.close();
+    }
+  }
   const routeInput = {
     name: config.provider,
     source: "webhook",
     match: { provider: config.provider, events: ["local.prompt"] },
-    target: { type: "new-thread", cwd: config.cwd, worktree: false, promptMode: "verbatim" },
+    target: {
+      type: "new-thread",
+      cwd: config.cwd,
+      worktree: false,
+      promptMode: "verbatim",
+      maxConcurrent: 4,
+      ...(config.appProjectId
+        ? { appProjectId: config.appProjectId, appOwnerThreadId: config.appOwnerThreadId }
+        : {}),
+    },
     sandbox: "user-config",
     enabled: true,
   };
@@ -212,6 +232,9 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
     route.target.cwd !== config.cwd ||
     route.sandbox !== "user-config" ||
     route.target.promptMode !== "verbatim" ||
+    route.target.maxConcurrent !== 4 ||
+    route.target.appProjectId !== config.appProjectId ||
+    route.target.appOwnerThreadId !== config.appOwnerThreadId ||
     route.promptTemplate !== null
   ) {
     throw new Error("workflow route was disabled or changed; refusing to dispatch");
@@ -256,8 +279,12 @@ async function run(config: Config, configFile: string): Promise<void> {
   const save = () =>
     fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   const remnote = new RemNoteMcp();
+  const registry = config.appProjectId
+    ? new NativeProjectRegistry(undefined, config.appOwnerThreadId)
+    : undefined;
   try {
     await verifyDaemon();
+    if (config.appProjectId) await registry?.verifyProject(config.appProjectId, config.cwd);
     await remnote.connect(config.mcpUrl);
     const dispatcher = await createDispatcher(config);
     const scan = await scanTodo(remnote, config.documentRemId, (scanned) =>
@@ -287,6 +314,8 @@ async function run(config: Config, configFile: string): Promise<void> {
         const receipt = await dispatcher.receipt(task.sourceDeliveryId);
         if (receipt?.threadId && receipt.turnId) {
           try {
+            if (config.appProjectId)
+              await registry?.register(receipt.threadId, config.appProjectId, config.cwd);
             const status = await acknowledgeStarted(remnote, task, receipt);
             if (status === "changed")
               throw new Error("source title changed after scan; left unchanged");
@@ -304,6 +333,9 @@ async function run(config: Config, configFile: string): Promise<void> {
             message: `dispatch ${receipt.status}; inspect WakeWire receipt ${receipt.id}; no replay`,
           });
           pending.delete(remId);
+        } else {
+          // File in source order, waiting only for acceptance, never turn completion.
+          break;
         }
       }
       report.pending = [...pending.keys()];
@@ -325,6 +357,7 @@ async function run(config: Config, configFile: string): Promise<void> {
   } catch (error) {
     report.errors.push({ message: error instanceof Error ? error.message : "workflow failed" });
   } finally {
+    await registry?.close().catch(() => {});
     await remnote.close().catch(() => {});
     report.finishedAt = new Date().toISOString();
     save();
@@ -359,6 +392,14 @@ async function main(): Promise<void> {
   if (command === "setup") return setup(config, configFile);
   if (command === "run") return run(config, configFile);
   await verifyDaemon();
+  if (config.appProjectId) {
+    const registry = new NativeProjectRegistry(undefined, config.appOwnerThreadId);
+    try {
+      await registry.verifyProject(config.appProjectId, config.cwd);
+    } finally {
+      await registry.close();
+    }
+  }
   const remnote = new RemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);

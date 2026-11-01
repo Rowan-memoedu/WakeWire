@@ -1,6 +1,8 @@
 import type { SandboxPolicy } from "../core/route.js";
 
 export interface DeliveryOptions {
+  appProjectId?: string | undefined;
+  appOwnerThreadId?: string | undefined;
   sandbox: SandboxPolicy;
   /** Working directory override (used for new threads; ignored for resume by some adapters). */
   cwd?: string | undefined;

@@ -91,6 +91,10 @@ export const RouteTargetSchema = z.discriminatedUnion("type", [
     worktree: z.boolean().default(false),
     /** Explicit local API prompts bypass event templates and envelopes. */
     promptMode: z.enum(["event", "verbatim"]).optional(),
+    /** Independent new threads in flight for this route. Existing routes stay serial. */
+    maxConcurrent: z.number().int().min(1).max(16).optional(),
+    appProjectId: z.string().min(1).optional(),
+    appOwnerThreadId: z.string().min(1).optional(),
   }),
 ]);
 
@@ -122,6 +126,27 @@ export const RouteInputSchema = z
     enabled: z.boolean().default(true),
   })
   .superRefine((route, ctx) => {
+    if (
+      route.target.type === "new-thread" &&
+      Boolean(route.target.appProjectId) !== Boolean(route.target.appOwnerThreadId)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "native app delivery requires both saved project and owner Thread",
+      });
+    }
+    if (
+      route.target.type === "new-thread" &&
+      route.target.appProjectId &&
+      (route.target.worktree || route.sandbox !== "user-config")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "native app delivery uses the saved local project and user configuration",
+      });
+    }
     if (
       route.target.type === "new-thread" &&
       route.target.promptMode === "verbatim" &&

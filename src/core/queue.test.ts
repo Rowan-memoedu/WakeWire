@@ -1,5 +1,5 @@
 import pino from "pino";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { openDatabase } from "../db/db.js";
 import { createStores, type Stores } from "../db/repos.js";
 import type { AgentAdapter, DeliveryOptions, DeliveryResult } from "../sinks/types.js";
@@ -193,6 +193,42 @@ describe("DeliveryQueue", () => {
     expect(stores.deliveries.get(delivery?.id ?? "")?.status).toBe("delivered");
   });
 
+  it("runs independent threads concurrently and refills a free slot while another turn is blocked", async () => {
+    const parallel = stores.routes.create(
+      routeInput({
+        target: { type: "new-thread", cwd: "/tmp", worktree: false, maxConcurrent: 2 },
+      }),
+    );
+    const release = new Map<string, () => void>();
+    const started: string[] = [];
+    adapter.startThread = async (prompt, opts) => {
+      const id = promptDeliveryId(prompt);
+      started.push(id);
+      opts.onSending?.();
+      opts.onAccepted?.({ threadId: id, turnId: `turn-${id}` });
+      await new Promise<void>((resolve) => release.set(id, resolve));
+      return { threadId: id, turnId: `turn-${id}` };
+    };
+    const deliveries = ["d-a", "d-b", "d-c"].map((id) =>
+      queue.enqueueEvent(parallel, makeEvent(id)),
+    );
+    const first = queue.tick();
+    expect(started).toEqual(["d-a", "d-b"]);
+    await queue.tick();
+    expect(started).toHaveLength(2);
+    release.get("d-b")?.();
+    await vi.waitFor(() =>
+      expect(stores.deliveries.get(deliveries[1]?.id ?? "")?.status).toBe("delivered"),
+    );
+    const refill = queue.tick();
+    expect(started).toEqual(["d-a", "d-b", "d-c"]);
+    expect(stores.deliveries.get(deliveries[0]?.id ?? "")?.status).toBe("delivering");
+    release.get("d-a")?.();
+    release.get("d-c")?.();
+    await Promise.all([first, refill]);
+    expect(stores.deliveries.list({ status: "delivered" })).toHaveLength(3);
+  });
+
   it("UnreachableError also retries forever", async () => {
     adapter.failWith = new UnreachableError("app closed");
     adapter.failTimes = Number.MAX_SAFE_INTEGER;
@@ -303,6 +339,40 @@ describe("DeliveryQueue", () => {
     await queue.tick();
     expect(stores.deliveries.get(wtDelivery?.id ?? "")?.status).toBe("failed");
     expect(stores.deliveries.get(wtDelivery?.id ?? "")?.error).toContain("worktree");
+  });
+
+  it("routes visible project creation through the native app without falling back to a private server", async () => {
+    const native = new FakeAdapter();
+    const q = new DeliveryQueue(stores, adapter, logger, {
+      autoWake: false,
+      nativeAppAdapter: native,
+    });
+    const visible = stores.routes.create(
+      routeInput({
+        sandbox: "user-config",
+        target: {
+          type: "new-thread",
+          cwd: "D:/work",
+          worktree: false,
+          appProjectId: "saved",
+          appOwnerThreadId: "owner",
+        },
+      }),
+    );
+    q.enqueueEvent(visible, makeEvent("d-visible"));
+    await q.tick();
+    expect(adapter.calls).toHaveLength(0);
+    expect(native.calls[0]?.opts).toMatchObject({
+      cwd: "D:/work",
+      appProjectId: "saved",
+      appOwnerThreadId: "owner",
+    });
+    native.failWith = new PermanentError("native app unavailable");
+    native.failTimes = 1;
+    q.enqueueEvent(visible, makeEvent("d-unavailable"));
+    await q.tick();
+    expect(adapter.calls).toHaveLength(0);
+    expect(stores.deliveries.list({ status: "failed" })).toHaveLength(1);
   });
 
   it("recovers crashed in-flight deliveries on start", async () => {

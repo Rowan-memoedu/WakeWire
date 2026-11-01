@@ -1,5 +1,6 @@
 import type { Delivery, Stores } from "../db/repos.js";
 import type { Logger } from "../logging.js";
+import { CodexNativeAppAdapter } from "../sinks/codex-native-app.js";
 import type { AgentAdapter } from "../sinks/types.js";
 import { BusyError, PermanentError, UnreachableError } from "../sinks/types.js";
 import { buildDigestPrompt, buildPrompt } from "./envelope.js";
@@ -8,6 +9,7 @@ import type { Route } from "./route.js";
 import { DEFAULT_TEMPLATES, renderTemplate, TemplateError, templateFields } from "./template.js";
 
 export interface QueueOptions {
+  nativeAppAdapter?: AgentAdapter;
   /** Max deliveries per route per minute before coalescing into a digest. */
   ratePerMinute?: number;
   /** Attempts before a non-busy, non-unreachable error becomes a permanent failure. */
@@ -37,6 +39,7 @@ export class DeliveryQueue {
   private readonly tickMs: number;
   private readonly now: () => Date;
   private readonly inFlight = new Set<string>();
+  private readonly activeRoutes = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
 
@@ -155,9 +158,9 @@ export class DeliveryQueue {
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
+    const jobs: Array<Promise<void>> = [];
     try {
       const ready = this.stores.deliveries.listReady(this.now().toISOString());
-      const jobs: Array<Promise<void>> = [];
       const claimed = new Set<string>();
 
       for (const delivery of ready) {
@@ -168,27 +171,34 @@ export class DeliveryQueue {
         }
         if (!route.enabled) continue;
         if (route.target.type === "new-thread") {
+          if ((this.activeRoutes.get(route.id) ?? 0) >= (route.target.maxConcurrent ?? 1)) continue;
           const since = new Date(this.now().getTime() - 60_000).toISOString();
           const limit = route.rateLimitPerMinute ?? this.ratePerMinute;
           if (this.stores.deliveries.countRecentAttempts(route.id, since) >= limit) continue;
         }
-        const key = threadKey(route);
+        const key =
+          route.target.type === "new-thread" ? `delivery:${delivery.id}` : threadKey(route);
         if (this.inFlight.has(key) || claimed.has(key)) continue; // strict per-thread FIFO
         claimed.add(key);
 
         const batch = this.maybeCoalesce(route, delivery, ready);
         this.inFlight.add(key);
+        this.activeRoutes.set(route.id, (this.activeRoutes.get(route.id) ?? 0) + 1);
         this.stores.deliveries.markDelivering(batch.id);
         jobs.push(
           this.process(route, batch).finally(() => {
             this.inFlight.delete(key);
+            const remaining = (this.activeRoutes.get(route.id) ?? 1) - 1;
+            if (remaining) this.activeRoutes.set(route.id, remaining);
+            else this.activeRoutes.delete(route.id);
           }),
         );
       }
-      await Promise.all(jobs);
     } finally {
       this.ticking = false;
     }
+    // The scheduling lock covers claiming only. Long turns must not block later passes.
+    await Promise.all(jobs);
   }
 
   queueDepth(): number {
@@ -273,6 +283,15 @@ export class DeliveryQueue {
       return this.adapter.deliverToThread(route.target.threadId, prompt, opts);
     }
     let cwd = route.target.cwd;
+    if (route.target.appProjectId) {
+      const native = this.options.nativeAppAdapter ?? new CodexNativeAppAdapter();
+      return native.startThread(prompt, {
+        ...opts,
+        cwd,
+        appProjectId: route.target.appProjectId,
+        appOwnerThreadId: route.target.appOwnerThreadId,
+      });
+    }
     if (route.target.worktree) {
       if (!this.options.prepareWorktree) {
         throw new PermanentError("worktree targets are not supported in this configuration");
