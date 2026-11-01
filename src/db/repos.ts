@@ -3,6 +3,7 @@ import type { Database } from "better-sqlite3";
 import type { WakeEvent } from "../core/event.js";
 import { WakeEventSchema } from "../core/event.js";
 import type { Route, RouteInput, RouteTarget, SandboxPolicy } from "../core/route.js";
+import type { MaintenanceReceipt } from "../workflows/maintenance-types.js";
 
 export type DeliveryStatus =
   | "received"
@@ -31,6 +32,7 @@ export interface Delivery {
   isReplay: boolean;
   updatedAt: string;
   dispatchStarted: boolean;
+  maintenance?: MaintenanceReceipt | null;
 }
 
 export type SourceKind = "github" | "gmail" | "slack" | "webhook";
@@ -72,6 +74,7 @@ interface DeliveryRow {
   is_replay: number;
   updated_at: string;
   dispatch_started: number;
+  maintenance_json: string | null;
 }
 
 interface SourceRow {
@@ -184,6 +187,70 @@ function toRoute(row: RouteRow): Route {
 
 export class DeliveryStore {
   constructor(private readonly db: Database) {}
+
+  /** Reserve a single external dispatch in the existing receipt ledger, never in the Codex queue. */
+  beginMaintenance(
+    routeId: string,
+    sourceDeliveryId: string,
+    prompt: string,
+    receipt: MaintenanceReceipt,
+  ): { delivery: Delivery; created: boolean } {
+    return this.db.transaction(() => {
+      const prior = this.list({ routeId, sourceDeliveryId, limit: 1 })[0];
+      if (prior) return { delivery: prior, created: false };
+      const delivery = this.enqueue({
+        routeId,
+        renderedPrompt: prompt,
+        event: {
+          source: "webhook",
+          kind: "local.maintenance",
+          deliveryId: sourceDeliveryId,
+          occurredAt: nowIso(),
+          summary: "RemNote maintenance request",
+          payload: {},
+        },
+      });
+      if (!delivery) throw new Error("maintenance receipt conflict");
+      this.db
+        .prepare(
+          "UPDATE deliveries SET status = 'delivering', dispatch_started = 1, maintenance_json = ? WHERE id = ?",
+        )
+        .run(JSON.stringify(receipt), delivery.id);
+      return { delivery: this.get(delivery.id) as Delivery, created: true };
+    })();
+  }
+
+  updateMaintenance(
+    id: string,
+    expectedRevision: number,
+    patch: Partial<MaintenanceReceipt>,
+  ): Delivery {
+    const delivery = this.get(id);
+    const prior = delivery?.maintenance;
+    if (!delivery || !prior || prior.revision !== expectedRevision)
+      throw new Error("stale maintenance receipt");
+    if (prior.runId && patch.runId && prior.runId !== patch.runId)
+      throw new Error("run identity is immutable");
+    const next = { ...prior, ...patch, revision: prior.revision + 1 };
+    if ((prior.completed && !next.completed) || (prior.started && !next.started))
+      throw new Error("receipt cannot move backwards");
+    this.db
+      .prepare(
+        "UPDATE deliveries SET maintenance_json = ?, status = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(JSON.stringify(next), next.runId ? "delivered" : "failed", nowIso(), id);
+    return this.get(id) as Delivery;
+  }
+
+  listMaintenance(routeId: string): Delivery[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM deliveries WHERE route_id = ? AND maintenance_json IS NOT NULL AND is_replay = 0 ORDER BY received_at",
+        )
+        .all(routeId) as DeliveryRow[]
+    ).map(toDelivery);
+  }
 
   /**
    * Insert a new delivery in `queued` status. If the same (route, source
@@ -395,6 +462,9 @@ function toDelivery(row: DeliveryRow): Delivery {
     isReplay: row.is_replay === 1,
     updatedAt: row.updated_at,
     dispatchStarted: row.dispatch_started === 1,
+    maintenance: row.maintenance_json
+      ? (JSON.parse(row.maintenance_json) as MaintenanceReceipt)
+      : null,
   };
 }
 

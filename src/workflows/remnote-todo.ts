@@ -7,6 +7,7 @@ export interface RemNode {
   parentRemId?: string | undefined;
   inlineRefs?: Array<{ targetRemId: string; text: string }> | undefined;
   media?: unknown[] | undefined;
+  remType?: string | undefined;
 }
 
 export interface RemPage {
@@ -36,6 +37,7 @@ export interface TodoTask {
   sourceDeliveryId: string;
   title: string;
   prompt: string;
+  subtreeFingerprint?: string;
 }
 
 export interface TodoReceipt {
@@ -58,7 +60,7 @@ export function isMarked(title: string): boolean {
   return MARKER.test(title);
 }
 
-function displayStartedTitle(title: string): string {
+export function displayStartedTitle(title: string): string {
   return title.replace(MARKER, "$1");
 }
 
@@ -72,7 +74,7 @@ function isTaskRoot(nodes: Map<string, RemNode>, node: RemNode, documentRemId: s
   );
 }
 
-async function allChildren(remnote: RemNoteReader, parent: string): Promise<RemNode[]> {
+export async function allChildren(remnote: RemNoteReader, parent: string): Promise<RemNode[]> {
   const result: RemNode[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
@@ -152,6 +154,7 @@ export async function scanTodo(
   remnote: RemNoteReader,
   documentRemId: string,
   progress: (count: number) => void = () => {},
+  excludedRemIds: ReadonlySet<string> = new Set(),
 ): Promise<{ tasks: TodoTask[]; conflicts: string[]; nodeCount: number }> {
   const nodes = new Map<string, RemNode>();
   const pending = [documentRemId];
@@ -162,6 +165,7 @@ export async function scanTodo(
     do {
       const page = await remnote.children(parent, cursor);
       for (const child of page.children) {
+        if (excludedRemIds.has(child.remId)) continue;
         if (child.parentRemId && child.parentRemId !== parent) continue;
         if (nodes.has(child.remId) || child.remId === documentRemId) continue;
         nodes.set(child.remId, { ...child, parentRemId: parent });
@@ -210,8 +214,36 @@ export async function scanTodo(
       sourceDeliveryId: eventIdFor(documentRemId, node.remId),
       title: node.title,
       prompt: renderTaskPrompt(nodes, node.remId, documentRemId),
+      subtreeFingerprint: fingerprintTaskNodes(nodes, node.remId),
     }));
   return { tasks, conflicts: [...conflicts], nodeCount: nodes.size };
+}
+
+/** Freeze the same source snapshot as the rendered command, including ordered descendant IDs. */
+export function fingerprintTaskNodes(
+  nodes: Map<string, RemNode>,
+  taskRemId: string,
+  excludedRemId?: string,
+): string {
+  const rows: unknown[] = [];
+  const seen = new Set<string>();
+  const visit = (id: string) => {
+    if (seen.has(id)) throw new Error("cycle in task subtree");
+    seen.add(id);
+    const node = nodes.get(id);
+    if (!node) throw new Error("task snapshot is incomplete");
+    const headline = node.headline ?? node.title;
+    rows.push([
+      id,
+      id === taskRemId ? displayStartedTitle(node.title) : node.title,
+      id === taskRemId ? displayStartedTitle(headline) : headline,
+      node.inlineRefs ?? [],
+    ]);
+    for (const child of nodes.values())
+      if (child.parentRemId === id && child.remId !== excludedRemId) visit(child.remId);
+  };
+  visit(taskRemId);
+  return crypto.createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
 
 /** Keep Markdown formatting and resolve reference tokens by exact ID, never by title search. */

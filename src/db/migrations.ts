@@ -155,6 +155,11 @@ const MIGRATIONS: ReadonlyArray<{
       ALTER TABLE routes_new RENAME TO routes;
     `,
   },
+  {
+    version: 6,
+    name: "github-actions-delivery-receipt",
+    sql: "ALTER TABLE deliveries ADD COLUMN maintenance_json TEXT;",
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */

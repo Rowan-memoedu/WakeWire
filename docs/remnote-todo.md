@@ -2,6 +2,8 @@
 
 Windows 计划任务每天北京时间 02:00 调用本流程。调度程序通过本地 RemNote MCP 完整扫描配置子树，机械提取行首单个 `%` 标记事项的原文，通过 WakeWire 经过认证的本地接口投放，再由 WakeWire 创建独立的真实 Codex Thread。`%%` 和未标记事项均不分发。
 
+配置 `maintenanceConfigFile` 后，同一计划先投放已绑定项目的 GitHub Actions 维护请求；普通待办扫描排除该配置列出的 Document 子树。绑定和 PR 合并归档见 [项目维护](remnote-maintenance.md)。普通待办的原生 Thread 行为保持原有语义。
+
 本工作流设置 `target.maxConcurrent: 4`，最多并行运行四个独立 Thread；有空位即接收下一项，无需等待其他 Thread 的首轮完成。投放按扫描顺序发起，归位按原任务顺序等待受理确认。单个已有 Thread 的多条投递仍串行，其他未配置并发的路由保持原行为。
 
 生产配置中的 `appProjectId` 指向用户保存的 local Project。每次运行通过随应用安装的官方 app-tools MCP 核验项目与工作目录。新事项由 WakeWire 直接调用应用原生 `create_thread`，目标为该 Project 的 local 环境，原文作为 prompt 原样传入，不指定模型或推理强度。应用负责可见 Thread 的创建和执行，WakeWire 保存受理身份并监测首轮状态；原生列表回读项目归属通过后才移入“已开始”。旧私有 App Server Thread 保留原身份，在可登记后用原生工具加入项目。这一步使 Thread 出现在应用的同一项目侧栏中。Windows 每次连接重新发现当前应用的原生端点；应用或官方工具不可用时报告失败，保留已有投递身份，不重建 Thread、不直接修改应用数据库。

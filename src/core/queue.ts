@@ -76,6 +76,8 @@ export class DeliveryQueue {
 
   /** Render the prompt for a matched event and persist it as a queued delivery. */
   enqueueEvent(route: Route, event: WakeEvent, opts: { isReplay?: boolean } = {}): Delivery | null {
+    if (route.target.type === "github-actions")
+      throw new PermanentError("Actions requests cannot be enqueued or replayed as Codex events");
     if (route.target.type === "new-thread" && route.target.promptMode === "verbatim") {
       throw new PermanentError("verbatim routes accept authenticated local prompts only");
     }
@@ -273,6 +275,8 @@ export class DeliveryQueue {
   }
 
   private async deliver(route: Route, delivery: Delivery, prompt: string) {
+    if (route.target.type === "github-actions")
+      throw new PermanentError("Actions dispatch belongs to the authenticated maintenance intake");
     const opts = {
       sandbox: route.sandbox,
       onSending: () => this.stores.deliveries.markSending(delivery.id),

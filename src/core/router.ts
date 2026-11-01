@@ -7,6 +7,7 @@ export function matchRoutes(routes: Route[], event: WakeEvent): Route[] {
     (route) =>
       route.enabled &&
       route.source === event.source &&
+      route.target.type !== "github-actions" &&
       !(route.target.type === "new-thread" && route.target.promptMode === "verbatim") &&
       matches(route, event),
   );

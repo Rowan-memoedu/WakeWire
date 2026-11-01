@@ -16,6 +16,7 @@ import { WebhookIngestSource } from "../sources/webhook/source.js";
 import { WebhookVerificationSchema } from "../sources/webhook/verify.js";
 import { VERSION } from "../version.js";
 import type { CodexSessionGateway } from "./codex-sessions.js";
+import { maintenanceRouteConflict, mountMaintenanceApi } from "./maintenance-api.js";
 import type { SourceManager } from "./sources.js";
 
 export interface ApiContext {
@@ -72,6 +73,8 @@ export function createApi(ctx: ApiContext): Hono {
     if (!parsed.success) {
       return c.json({ error: "invalid route", issues: parsed.error.issues }, 400);
     }
+    const conflict = maintenanceRouteConflict(ctx.stores, parsed.data);
+    if (conflict) return c.json({ error: conflict }, 409);
     const route = ctx.stores.routes.create(parsed.data);
     const warnings: string[] = [];
     if (route.source === "gmail") {
@@ -94,6 +97,8 @@ export function createApi(ctx: ApiContext): Hono {
     const parsed = RouteInputSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success)
       return c.json({ error: "invalid route", issues: parsed.error.issues }, 400);
+    const conflict = maintenanceRouteConflict(ctx.stores, parsed.data, c.req.param("id"));
+    if (conflict) return c.json({ error: conflict }, 409);
     const route = ctx.stores.routes.update(c.req.param("id"), parsed.data);
     return route ? c.json({ route }) : c.json({ error: "route not found" }, 404);
   });
@@ -132,6 +137,8 @@ export function createApi(ctx: ApiContext): Hono {
     const ok = ctx.stores.routes.setEnabled(c.req.param("id"), enabled.data.enabled);
     return ok ? c.json({ ok: true }) : c.json({ error: "route not found" }, 404);
   });
+
+  mountMaintenanceApi(app, ctx.stores);
 
   // --- deliveries ---
 

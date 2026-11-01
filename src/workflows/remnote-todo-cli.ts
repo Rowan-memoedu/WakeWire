@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -31,6 +32,7 @@ const ConfigSchema = z.object({
   appProjectId: z.string().optional(),
   appOwnerThreadId: z.string().optional(),
   waitMinutes: z.number().int().min(1).max(1380).default(1320),
+  maintenanceConfigFile: z.string().optional(),
 });
 type Config = z.infer<typeof ConfigSchema>;
 
@@ -41,6 +43,7 @@ const NodeSchema = z.object({
   parentRemId: z.string().optional(),
   inlineRefs: z.array(z.object({ targetRemId: z.string(), text: z.string() })).optional(),
   media: z.array(z.unknown()).optional(),
+  remType: z.string().optional(),
 });
 
 function unwrap(result: unknown): unknown {
@@ -56,7 +59,7 @@ function unwrap(result: unknown): unknown {
   return JSON.parse(text);
 }
 
-class RemNoteMcp implements RemNoteReader {
+export class RemNoteMcp implements RemNoteReader {
   private readonly client = new Client({ name: "wakewire-remnote-todo", version: VERSION });
   async connect(url: string): Promise<void> {
     const parsed = new URL(url);
@@ -287,8 +290,19 @@ async function run(config: Config, configFile: string): Promise<void> {
     if (config.appProjectId) await registry?.verifyProject(config.appProjectId, config.cwd);
     await remnote.connect(config.mcpUrl);
     const dispatcher = await createDispatcher(config);
-    const scan = await scanTodo(remnote, config.documentRemId, (scanned) =>
-      console.log(JSON.stringify({ scanned })),
+    const excluded = new Set<string>();
+    if (config.maintenanceConfigFile) {
+      const { MaintenanceConfigSchema } = await import("./maintenance-types.js");
+      const maintenance = MaintenanceConfigSchema.parse(
+        JSON.parse(fs.readFileSync(config.maintenanceConfigFile, "utf8")),
+      );
+      for (const binding of maintenance.bindings) excluded.add(binding.documentRemId);
+    }
+    const scan = await scanTodo(
+      remnote,
+      config.documentRemId,
+      (scanned) => console.log(JSON.stringify({ scanned })),
+      excluded,
     );
     report.scanned = scan.nodeCount;
     report.markedTasks = scan.tasks.length;
@@ -410,7 +424,8 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : "RemNote workflow failed");
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : "RemNote workflow failed");
+    process.exitCode = 1;
+  });

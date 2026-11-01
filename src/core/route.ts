@@ -79,6 +79,14 @@ export const GmailMatchSchema = z.object({
 
 export const RouteTargetSchema = z.discriminatedUnion("type", [
   z.object({
+    type: z.literal("github-actions"),
+    repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
+    hub: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
+    workflow: z.literal("maintenance.yml"),
+    ref: z.literal("main"),
+    documentRemId: z.string().regex(/^[A-Za-z0-9_-]+$/),
+  }),
+  z.object({
     type: z.literal("thread"),
     /** Existing Codex thread id (UUID from ~/.codex/sessions). */
     threadId: z.string().min(1),
@@ -126,6 +134,15 @@ export const RouteInputSchema = z
     enabled: z.boolean().default(true),
   })
   .superRefine((route, ctx) => {
+    if (
+      route.target.type === "github-actions" &&
+      (route.source !== "webhook" || route.promptTemplate || route.sandbox !== "read-only")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Actions routes accept authenticated local maintenance requests only",
+      });
+    }
     if (
       route.target.type === "new-thread" &&
       Boolean(route.target.appProjectId) !== Boolean(route.target.appOwnerThreadId)

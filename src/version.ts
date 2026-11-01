@@ -1,1 +1,1 @@
-export const VERSION = "0.1.0-workflow-bridge.6";
+export const VERSION = "0.1.0-workflow-bridge.7";

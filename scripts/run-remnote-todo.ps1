@@ -8,5 +8,13 @@ foreach ($name in @('CODEX_APP_TOOLS_PIPE_PATH','CODEX_INTERNAL_ORIGINATOR_OVERR
     [Environment]::SetEnvironmentVariable($name,$null,'Process')
 }
 $log = Join-Path (Split-Path -Parent $Config) 'scheduler.log'
+$maintenanceExit = 0
+$settings = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
+if ($settings.maintenanceConfigFile) {
+    $maintenanceEntry = Join-Path (Split-Path -Parent $Entry) 'remnote-maintenance-cli.js'
+    & $Node $maintenanceEntry run $settings.maintenanceConfigFile >> $log 2>&1
+    $maintenanceExit = $LASTEXITCODE
+}
 & $Node $Entry run $Config >> $log 2>&1
+if ($maintenanceExit -ne 0) { exit $maintenanceExit }
 exit $LASTEXITCODE
