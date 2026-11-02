@@ -4,6 +4,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { z } from "zod";
+import type { ProjectRegistration } from "../db/repos.js";
 import type { DeliveryOptions, DeliveryResult } from "../sinks/types.js";
 
 type Call = (name: string, args: Record<string, unknown>) => Promise<unknown>;
@@ -112,14 +113,37 @@ export class NativeProjectRegistry {
     }
   }
 
-  async register(threadId: string, projectId: string, cwd: string): Promise<void> {
+  async register(
+    threadId: string,
+    projectId: string,
+    cwd: string,
+    afterRelease = false,
+  ): Promise<void> {
     if (this.registered.has(threadId)) return;
     await this.verifyProject(projectId, cwd);
+    if (afterRelease) {
+      // A previous move may have succeeded before its receipt was saved.
+      if (await this.hasProject(threadId, projectId, cwd)) return;
+      z.object({ navigated: z.literal(true) }).parse(
+        await this.call("navigate_to_codex_page", { threadId }),
+      );
+      const deadline = Date.now() + 15_000;
+      while ((await this.readThread(threadId)).thread.status.type !== "idle") {
+        if (Date.now() >= deadline) throw new Error("desktop has not loaded the released Thread");
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
     const moved = z
       .object({ threadId: z.string(), projectId: z.string().nullable() })
       .parse(await this.call("move_thread_to_project", { threadId, projectId, hostId: "local" }));
     if (moved.threadId !== threadId || moved.projectId !== projectId)
       throw new Error("native project registration mismatch");
+    if (!(await this.hasProject(threadId, projectId, cwd)))
+      throw new Error("native project readback mismatch");
+    this.registered.add(threadId);
+  }
+
+  private async hasProject(threadId: string, projectId: string, cwd: string): Promise<boolean> {
     let cursor: string | undefined;
     const seen = new Set<string>();
     do {
@@ -145,20 +169,15 @@ export class NativeProjectRegistry {
         );
       const thread = result.threads.find((t) => t.id === threadId);
       if (thread) {
-        if (
-          thread.projectId !== projectId ||
-          !thread.cwd ||
-          normalized(thread.cwd) !== normalized(cwd)
-        )
+        if (thread.cwd && normalized(thread.cwd) !== normalized(cwd))
           throw new Error("native project readback mismatch");
-        this.registered.add(threadId);
-        return;
+        return Boolean(thread.cwd) && thread.projectId === projectId;
       }
       cursor = result.nextCursor ?? undefined;
       if (cursor && seen.has(cursor)) throw new Error("native thread pagination repeated");
       if (cursor) seen.add(cursor);
     } while (cursor);
-    throw new Error("registered thread is missing from native app history");
+    return false;
   }
 
   async close(): Promise<void> {
@@ -265,5 +284,17 @@ export class NativeProjectRegistry {
         await new Promise((resolve) => setTimeout(resolve, useRead && turnId ? 30_000 : 1000));
     }
     throw new Error("native turn monitoring timed out; identity retained");
+  }
+}
+
+export async function registerReleasedThread(
+  threadId: string,
+  project: ProjectRegistration,
+): Promise<void> {
+  const registry = new NativeProjectRegistry(undefined, project.ownerThreadId);
+  try {
+    await registry.register(threadId, project.projectId, project.cwd, true);
+  } finally {
+    await registry.close();
   }
 }

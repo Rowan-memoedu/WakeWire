@@ -55,7 +55,7 @@ interface TurnCompletedNotification {
 interface TurnWaiter {
   resolve: (turn: Turn) => void;
   reject: (err: Error) => void;
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | undefined;
 }
 
 /** How long to wait for a turn to finish before giving up (agent turns can be long). */
@@ -119,7 +119,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async startThread(prompt: string, opts: DeliveryOptions): Promise<DeliveryResult> {
-    if (this.needsPrivateSession()) {
+    if ((!this.deliveryScoped && opts.privateAppServer) || this.needsPrivateSession()) {
       return this.withPrivateSession((session) => session.startThread(prompt, opts));
     }
     const rpc = await this.connect();
@@ -147,7 +147,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     prompt: string,
     opts: DeliveryOptions,
   ): Promise<DeliveryResult> {
-    const completion = this.awaitTurnCompletion(threadId);
+    const completion = this.awaitTurnCompletion(threadId, opts.privateAppServer);
     // A rejected turn/start cancels this waiter before it can be awaited below.
     // Keep that cancellation handled while preserving the original RPC error.
     void completion.catch(() => {});
@@ -182,15 +182,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
     return { threadId, turnId, finalResponse: finalMessageOf(turn) };
   }
 
-  private awaitTurnCompletion(threadId: string): Promise<Turn> {
+  private awaitTurnCompletion(threadId: string, waitForOwnedTurn = false): Promise<Turn> {
     // A prior waiter for this thread should never exist (BusyError), but if it
     // somehow does, fail it rather than leak it.
     this.cancelWaiter(threadId, new Error("superseded by a new turn"));
     return new Promise<Turn>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.turnWaiters.delete(threadId);
-        reject(new UnreachableError(`turn on ${threadId} did not complete in time`));
-      }, TURN_COMPLETION_TIMEOUT_MS);
+      const timer = waitForOwnedTurn
+        ? undefined
+        : setTimeout(() => {
+            this.turnWaiters.delete(threadId);
+            reject(new UnreachableError(`turn on ${threadId} did not complete in time`));
+          }, TURN_COMPLETION_TIMEOUT_MS);
       this.turnWaiters.set(threadId, { resolve, reject, timer });
     });
   }
@@ -271,6 +273,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const session = new CodexAppServerAdapter(this.logger, {
       ...this.config,
       connection: "spawn",
+      listenUrl: undefined,
     });
     session.deliveryScoped = true;
     this.privateSessions.add(session);

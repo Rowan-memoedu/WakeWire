@@ -16,7 +16,6 @@ import {
   placeCompleted,
   placeStarted,
   taskFingerprint,
-  writeFeedback,
 } from "./remnote-maintenance.js";
 import { type RemNode, type RemNoteReader, scanTodo } from "./remnote-todo.js";
 
@@ -93,17 +92,16 @@ describe("RemNote maintenance lifecycle", () => {
     await placeStarted(f.remnote, receipt, buckets.started);
     expect(f.nodes.get("task")?.title).toBe("修复\n第二行");
     receipt.started = true;
-    // Recover an interrupted rich-link write whose MCP readback contains labels only.
-    const interruptedFeedback = await f.remnote.create("task", "执行进度：运行中\nActions 运行");
-    receipt.feedbackRemId = await writeFeedback(f.remnote, receipt, "等待审核合并 PR");
-    expect(receipt.feedbackRemId).toBe(interruptedFeedback);
-    expect((await f.remnote.read(interruptedFeedback)).title).toContain(receipt.runUrl);
+    // Old receipts can already own a progress child. Preserve its content across both moves.
+    const oldTitle = "执行进度：运行中\nActions 运行";
+    receipt.feedbackRemId = await f.remnote.create("task", oldTitle);
     expect(await taskFingerprint(f.remnote, "task", receipt.feedbackRemId)).toBe(
       receipt.fingerprint,
     );
     await placeCompleted(f.remnote, receipt, buckets.started, buckets.completed);
     await placeCompleted(f.remnote, receipt, buckets.started, buckets.completed);
     expect(f.nodes.get("task")?.parentRemId).toBe(buckets.completed);
+    expect((await f.remnote.read(receipt.feedbackRemId)).title).toBe(oldTitle);
     expect(f.nodes.get("detail-3")).toEqual({
       remId: "detail-3",
       title: "$x_3$ 与代码",

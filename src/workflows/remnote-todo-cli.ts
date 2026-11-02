@@ -9,7 +9,7 @@ import { z } from "zod";
 import { apiFetch } from "../client.js";
 import type { Route } from "../core/route.js";
 import { VERSION } from "../version.js";
-import { NativeProjectRegistry, nativeCallerThreadId } from "./native-project.js";
+import { NativeProjectRegistry } from "./native-project.js";
 import {
   acknowledgeStarted,
   ensureQueued,
@@ -183,7 +183,11 @@ async function setup(config: Config, configFile: string): Promise<void> {
       promptMode: "verbatim",
       maxConcurrent: 4,
       ...(config.appProjectId
-        ? { appProjectId: config.appProjectId, appOwnerThreadId: config.appOwnerThreadId }
+        ? {
+            appProjectId: config.appProjectId,
+            appOwnerThreadId: config.appOwnerThreadId,
+            projectPlacement: "after-turn",
+          }
         : {}),
     },
     sandbox: "user-config",
@@ -238,6 +242,7 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
     route.target.maxConcurrent !== 4 ||
     route.target.appProjectId !== config.appProjectId ||
     route.target.appOwnerThreadId !== config.appOwnerThreadId ||
+    (config.appProjectId && route.target.projectPlacement !== "after-turn") ||
     route.promptTemplate !== null
   ) {
     throw new Error("workflow route was disabled or changed; refusing to dispatch");
@@ -252,7 +257,6 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
       await api(`/api/routes/${routeId}/prompts`, {
         sourceDeliveryId: task.sourceDeliveryId,
         prompt: task.prompt,
-        ...(config.appProjectId ? { nativeCallerThreadId: nativeCallerThreadId() } : {}),
       });
     },
   };
@@ -283,12 +287,8 @@ async function run(config: Config, configFile: string): Promise<void> {
   const save = () =>
     fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   const remnote = new RemNoteMcp();
-  const registry = config.appProjectId
-    ? new NativeProjectRegistry(undefined, config.appOwnerThreadId)
-    : undefined;
   try {
     await verifyDaemon();
-    if (config.appProjectId) await registry?.verifyProject(config.appProjectId, config.cwd);
     await remnote.connect(config.mcpUrl);
     const dispatcher = await createDispatcher(config);
     const excluded = new Set<string>();
@@ -329,8 +329,6 @@ async function run(config: Config, configFile: string): Promise<void> {
         const receipt = await dispatcher.receipt(task.sourceDeliveryId);
         if (receipt?.threadId && receipt.turnId) {
           try {
-            if (config.appProjectId)
-              await registry?.register(receipt.threadId, config.appProjectId, config.cwd);
             const status = await acknowledgeStarted(remnote, task, receipt);
             if (status === "changed")
               throw new Error("source title changed after scan; left unchanged");
@@ -372,7 +370,6 @@ async function run(config: Config, configFile: string): Promise<void> {
   } catch (error) {
     report.errors.push({ message: error instanceof Error ? error.message : "workflow failed" });
   } finally {
-    await registry?.close().catch(() => {});
     await remnote.close().catch(() => {});
     report.finishedAt = new Date().toISOString();
     save();

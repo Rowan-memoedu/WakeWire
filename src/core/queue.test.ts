@@ -126,6 +126,78 @@ describe("DeliveryQueue", () => {
     expect(stored?.turnId).toBe("turn-1");
   });
 
+  it("accepts without a caller, then retries only project placement after the owned turn releases", async () => {
+    const target = stores.routes.create(
+      routeInput({
+        source: "webhook",
+        match: { provider: "todo" },
+        sandbox: "user-config",
+        target: {
+          type: "new-thread",
+          cwd: "D:/work",
+          worktree: false,
+          promptMode: "verbatim",
+          appProjectId: "saved",
+          appOwnerThreadId: "owner",
+          projectPlacement: "after-turn",
+        },
+      }),
+    );
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const receipt = { threadId: "existing", turnId: "first" };
+    const startThread = vi.fn(async (_prompt: string, opts: DeliveryOptions) => {
+      expect(opts).toMatchObject({
+        privateAppServer: true,
+        sandbox: "user-config",
+        cwd: "D:/work",
+      });
+      opts.onSending?.();
+      opts.onAccepted?.(receipt);
+      await released;
+      return receipt;
+    });
+    const direct: AgentAdapter = {
+      name: "codex-app-server",
+      startThread,
+      deliverToThread: vi.fn(),
+      probe: vi.fn(),
+    };
+    const registerProject = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("desktop unavailable"))
+      .mockResolvedValue(undefined);
+    const options = { autoWake: false, now: () => now, registerProject };
+    const first = new DeliveryQueue(stores, direct, logger, options);
+    const delivery = first.enqueuePrompt(target, "task", "original") as NonNullable<
+      ReturnType<typeof first.enqueuePrompt>
+    >;
+    const processing = first.tick();
+    expect(stores.deliveries.get(delivery.id)).toMatchObject({ ...receipt, status: "delivering" });
+    await first.tick();
+    expect(registerProject).not.toHaveBeenCalled();
+    release();
+    await processing;
+    now = new Date(Date.now() + 60_000);
+    await first.tick();
+    expect(stores.deliveries.get(delivery.id)).toMatchObject({
+      ...receipt,
+      status: "delivered",
+      projectRegistration: { lastError: "desktop unavailable" },
+    });
+    const restarted = new DeliveryQueue(stores, direct, logger, options);
+    now = new Date(now.getTime() + 16 * 60_000);
+    await restarted.tick();
+    await restarted.tick();
+    expect(stores.deliveries.get(delivery.id)?.projectRegistration?.registeredAt).toBe(
+      now.toISOString(),
+    );
+    expect(registerProject).toHaveBeenCalledTimes(2);
+    expect(startThread).toHaveBeenCalledTimes(1);
+  });
+
   it("dedups by source delivery id and records the skip", async () => {
     queue.enqueueEvent(route, makeEvent("dup"));
     const second = queue.enqueueEvent(route, makeEvent("dup"));

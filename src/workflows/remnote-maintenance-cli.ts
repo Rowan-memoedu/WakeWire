@@ -33,7 +33,6 @@ import {
   placeStarted,
   taskFingerprint,
   verifyDocument,
-  writeFeedback,
 } from "./remnote-maintenance.js";
 import { eventIdFor, scanTodo } from "./remnote-todo.js";
 import { RemNoteMcp } from "./remnote-todo-cli.js";
@@ -163,7 +162,13 @@ async function processBindings(
   const report = {
     mode,
     startedAt: new Date().toISOString(),
-    dispatched: [] as Array<{ repository: string; taskRemId: string; runUrl: string }>,
+    dispatched: [] as Array<{
+      repository: string;
+      taskRemId: string;
+      runUrl?: string;
+      deliveryId?: string;
+    }>,
+    started: [] as string[],
     completed: [] as string[],
     errors: [] as Array<{ taskRemId?: string; message: string }>,
     scanned: [] as Array<{ title: string; marked: number; conflicts: number }>,
@@ -220,7 +225,17 @@ async function processBindings(
                 if (!claim.created) continue;
                 let delivery = claim.delivery;
                 if (config.execution === "native") {
-                  await ensureNativeDelivery(config, configFile, binding, delivery);
+                  const accepted = await ensureNativeDelivery(
+                    config,
+                    configFile,
+                    binding,
+                    delivery,
+                  );
+                  report.dispatched.push({
+                    repository: binding.repository,
+                    taskRemId: task.taskRemId,
+                    deliveryId: accepted.id,
+                  });
                   continue;
                 }
                 try {
@@ -287,21 +302,14 @@ async function processBindings(
               if (!receipt.started && receipt.nativeTurnId) {
                 await placeStarted(remnote, receipt, buckets.started);
                 delivery = await patchReceipt(delivery, { started: true });
+                report.started.push(receipt.taskRemId);
                 receipt = delivery.maintenance as MaintenanceReceipt;
               }
               const progress = await nativeProgress(config, delivery);
-              const feedbackRemId = await writeFeedback(
-                remnote,
-                receipt,
-                progress.status,
-                undefined,
-                progress.links,
-              );
-              delivery = await patchReceipt(delivery, {
-                feedbackRemId,
-                lastStatus: progress.status,
-              });
-              receipt = delivery.maintenance as MaintenanceReceipt;
+              if (receipt.lastStatus !== progress.status) {
+                delivery = await patchReceipt(delivery, { lastStatus: progress.status });
+                receipt = delivery.maintenance as MaintenanceReceipt;
+              }
               if (progress.complete) {
                 await placeCompleted(remnote, receipt, buckets.started, buckets.completed);
                 await patchReceipt(delivery, { completed: true });
@@ -314,6 +322,7 @@ async function processBindings(
             if (!receipt.started) {
               await placeStarted(remnote, receipt, buckets.started);
               delivery = await patchReceipt(delivery, { started: true });
+              report.started.push(receipt.taskRemId);
               receipt = delivery.maintenance as MaintenanceReceipt;
             }
             const run = await github.request<WorkflowRun>(
@@ -380,13 +389,13 @@ async function processBindings(
                 }
               }
             }
-            const feedbackRemId = await writeFeedback(remnote, receipt, status, prUrl);
-            delivery = await patchReceipt(delivery, {
-              feedbackRemId,
-              lastStatus: status,
-              ...(prUrl ? { prUrl } : {}),
-            });
-            receipt = delivery.maintenance as MaintenanceReceipt;
+            if (receipt.lastStatus !== status || (prUrl && receipt.prUrl !== prUrl)) {
+              delivery = await patchReceipt(delivery, {
+                lastStatus: status,
+                ...(prUrl ? { prUrl } : {}),
+              });
+              receipt = delivery.maintenance as MaintenanceReceipt;
+            }
             if (complete) {
               await placeCompleted(remnote, receipt, buckets.started, buckets.completed);
               await patchReceipt(delivery, { completed: true });
@@ -403,6 +412,10 @@ async function processBindings(
         });
       }
     }
+  } catch (error) {
+    report.errors.push({
+      message: error instanceof Error ? error.message : "maintenance workflow failed",
+    });
   } finally {
     await remnote.close();
     const reportFile = path.join(path.dirname(configFile), `last-${mode}.json`);

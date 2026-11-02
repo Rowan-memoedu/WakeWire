@@ -160,6 +160,16 @@ const MIGRATIONS: ReadonlyArray<{
     name: "github-actions-delivery-receipt",
     sql: "ALTER TABLE deliveries ADD COLUMN maintenance_json TEXT;",
   },
+  {
+    version: 7,
+    name: "project-placement-after-turn",
+    sql: `
+      ALTER TABLE deliveries ADD COLUMN project_registration_json TEXT;
+      ALTER TABLE deliveries ADD COLUMN project_registration_due_at TEXT;
+      CREATE INDEX deliveries_due_project_registration ON deliveries(project_registration_due_at)
+        WHERE project_registration_due_at IS NOT NULL;
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */

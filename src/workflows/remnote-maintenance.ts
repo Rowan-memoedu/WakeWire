@@ -125,36 +125,3 @@ export async function placeCompleted(
   )
     throw new Error("completed placement readback mismatch");
 }
-
-export async function writeFeedback(
-  remnote: RemNoteReader,
-  receipt: MaintenanceReceipt,
-  status: string,
-  prUrl?: string,
-  links?: string[],
-): Promise<string> {
-  // The MCP title reader exposes visible text, not Markdown link destinations.
-  const title = links
-    ? [`执行进度：${status}`, ...links].join("\n")
-    : `执行进度：${status}\nActions：${receipt.runUrl}${prUrl ? `\nPR：${prUrl}` : ""}`;
-  let id = receipt.feedbackRemId;
-  if (!id) {
-    const matches = (await allChildren(remnote, receipt.taskRemId)).filter(
-      (n) =>
-        n.title.startsWith("执行进度：") &&
-        (n.title === title ||
-          n.title.includes(receipt.runUrl ?? "\0") ||
-          /^执行进度：[^\n]+\nActions 运行(?:\nPR)?$/u.test(n.title)),
-    );
-    if (matches.length > 1) throw new Error("multiple progress notes need review");
-    id = matches[0]?.remId ?? (await remnote.create(receipt.taskRemId, title));
-  }
-  const before = await remnote.read(id);
-  if (before.parentRemId !== receipt.taskRemId)
-    throw new Error("progress note was moved; left unchanged");
-  if (before.title !== title) await remnote.updateTitle(id, title);
-  const after = await remnote.read(id);
-  if (after.parentRemId !== receipt.taskRemId || after.title !== title)
-    throw new Error("progress readback mismatch");
-  return id;
-}

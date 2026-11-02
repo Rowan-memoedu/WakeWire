@@ -1,12 +1,12 @@
 # RemNote 待办定时分发
 
-Codex 原生计划任务每天北京时间 02:00，在已保存 Project 的 local 环境调用 `scripts/run-remnote-todo.ps1`。原生计划沿用用户的 Full access 默认权限；脚本保留执行器提供的 `CODEX_THREAD_ID`，每次投放把当次调用者身份连同原文交给 WakeWire。调度程序通过本地 RemNote MCP 完整扫描配置子树，机械提取行首单个 `%` 标记事项的原文，再由 WakeWire 创建独立的真实 Codex Thread。`%%` 和未标记事项均不分发。原 Windows `WakeWire - RemNote Todo 0200` 计划停用，避免重复调度。
+Windows 计划任务 `WakeWire - RemNote Todo 0200` 每天北京时间 02:00 直接运行 `scripts/run-remnote-todo.ps1`。脚本通过本地 RemNote MCP 扫描配置子树，将行首单个 `%` 标记事项的原文投放给 WakeWire。`%%` 和未标记事项保留原位。
 
 配置 `maintenanceConfigFile` 后，同一计划先投放已绑定项目的 GitHub Actions 维护请求；普通待办扫描排除该配置列出的 Document 子树。绑定和 PR 合并归档见 [项目维护](remnote-maintenance.md)。普通待办的原生 Thread 行为保持原有语义。
 
 本工作流设置 `target.maxConcurrent: 4`，最多并行运行四个独立 Thread；有空位即接收下一项，无需等待其他 Thread 的首轮完成。投放按扫描顺序发起，归位按原任务顺序等待受理确认。单个已有 Thread 的多条投递仍串行，其他未配置并发的路由保持原行为。
 
-生产配置中的 `appProjectId` 指向用户保存的 local Project。每次运行通过随应用安装的官方 app-tools MCP 核验项目与工作目录。新事项由 WakeWire 直接调用应用原生 `create_thread`，目标为该 Project 的 local 环境，原文作为 prompt 原样传入，不指定模型或推理强度。应用负责可见 Thread 的创建和执行，WakeWire 保存受理身份并监测首轮状态；原生列表回读项目归属通过后才移入“已开始”。旧私有 App Server Thread 保留原身份，在可登记后用原生工具加入项目。这一步使 Thread 出现在应用的同一项目侧栏中。Windows 每次连接重新发现当前应用的原生端点；应用或官方工具不可用时报告失败，保留已有投递身份，不重建 Thread、不直接修改应用数据库。
+WakeWire 为每个新事项启动私有 Codex App Server，在配置的 `cwd` 创建 Thread。首轮受理即可移动原 Rem 到“已开始”。首轮结束后释放该 App Server，后台通过官方 app-tools 载入已有 Thread，移动到 `appProjectId` 指定的 Project，并核对 Thread ID、Project 和工作目录。载入会切换桌面主窗口。若应用暂不可用，补做归属时沿用已保存的投递和 Thread 身份。
 
 母项上标记 `%`：直接投放该项及完整子树的原文。子项上标记 `%`：投放直接母项及其全部后代，只在前面增加一句“本次任务是下文母项的第 N 个子项及其下属内容，其他部分仅作背景。”已开始母项下的新 `%` 子项仍创建独立 Thread。
 
@@ -25,10 +25,10 @@ node <installed-dist>/workflows/remnote-todo-cli.js setup <absolute-config.json>
 node <installed-dist>/workflows/remnote-todo-cli.js check <absolute-config.json>
 ```
 
-`setup` 和 `check` 均不读取清单内容、不发起任务。周期调度通过官方 `automation_update` 管理，使用保存的 local Project；不要再安装旧 Windows 扫描计划。只有 `run` 或计划触发才消费标记。检查结果必须显示已安装版本与运行中的 daemon 一致。
+`setup` 和 `check` 核验本机配置与服务版本。`run` 或 Windows 计划触发时才消费标记。
 
-需要用户登录 Windows、ChatGPT 桌面端中的 Codex 正在运行、计算机处于唤醒状态、WakeWire 后台正常运行、RemNote 桥接已连接。原生计划不保证唤醒睡眠中的计算机或补跑关机期间错过的时间。错误和确认结果保存在配置目录的 `last-run.json`，计划进程的退出码为非零表示需要检查；输入内容不会写入日志。
+Windows 用户须登录，WakeWire 和本地 RemNote 桥接须可用。Project 归属需要 ChatGPT 桌面端中的 Codex 正在运行。扫描结果存储在配置目录的 `last-run.json`。
 
-本流程的本地路由显式使用 `target.promptMode: verbatim` 和 `sandbox: user-config`，将完整原文作为原生用户消息发送。原生创建从当次正在运行的调用者继承权限；旧配置中的 `appOwnerThreadId` 仅保留用于历史回读，不再作为新投放的权限来源。WakeWire 在创建前核验当次调用者仍在运行；缺失执行器身份或调用者已退出时不创建，不静默使用旧调用者。原文不包含这些传输字段。事件入口不能向此路由投递；其他路由仍使用原有模板和事件信封，邮件仍强制只读。其他 SDK 会话桥接沿用原 App Server。
+本地路由使用 `promptMode: verbatim`、`sandbox: user-config` 和 `projectPlacement: after-turn`。私有 App Server 采用本机的权限配置。保存的 `appOwnerThreadId` 供桌面工具在首轮结束后办理归属，投放可由独立进程发起。
 
-暂停流程：暂停 Codex 原生计划任务及对应 WakeWire route。不要删除投递历史，否则会丢失去重依据。不要手工 replay 未知结果或已确认受理的记录；先检查已有 Thread。
+需要暂停时停用 Windows 计划和对应路由。保留投递记录用于去重与恢复。

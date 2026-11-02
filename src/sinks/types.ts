@@ -3,6 +3,8 @@ import type { SandboxPolicy } from "../core/route.js";
 export interface DeliveryOptions {
   appProjectId?: string | undefined;
   appOwnerThreadId?: string | undefined;
+  /** A dedicated App Server owns the first turn until the native completion notification. */
+  privateAppServer?: boolean;
   sandbox: SandboxPolicy;
   /** Working directory override (used for new threads; ignored for resume by some adapters). */
   cwd?: string | undefined;

@@ -33,6 +33,15 @@ export interface Delivery {
   updatedAt: string;
   dispatchStarted: boolean;
   maintenance?: MaintenanceReceipt | null;
+  projectRegistration?: ProjectRegistration | null;
+}
+
+export interface ProjectRegistration {
+  projectId: string;
+  cwd: string;
+  ownerThreadId: string;
+  registeredAt?: string;
+  lastError?: string;
 }
 
 export type SourceKind = "github" | "gmail" | "slack" | "webhook";
@@ -75,6 +84,7 @@ interface DeliveryRow {
   updated_at: string;
   dispatch_started: number;
   maintenance_json: string | null;
+  project_registration_json: string | null;
 }
 
 interface SourceRow {
@@ -384,10 +394,34 @@ export class DeliveryStore {
     this.update(id, { status: "delivering" });
   }
 
-  markSending(id: string): void {
+  markSending(id: string, project?: ProjectRegistration): void {
     this.db
-      .prepare("UPDATE deliveries SET dispatch_started = 1, updated_at = ? WHERE id = ?")
-      .run(nowIso(), id);
+      .prepare(`UPDATE deliveries SET dispatch_started = 1, updated_at = @now,
+        project_registration_json = COALESCE(project_registration_json, @project),
+        project_registration_due_at = CASE WHEN @project IS NOT NULL THEN @now ELSE project_registration_due_at END
+        WHERE id = @id`)
+      .run({ now: nowIso(), id, project: project ? JSON.stringify(project) : null });
+  }
+
+  nextProjectRegistration(now: string): Delivery | null {
+    const row = this.db
+      .prepare(`SELECT * FROM deliveries
+      WHERE project_registration_due_at <= ? AND status IN ('delivered', 'failed')
+      AND thread_id IS NOT NULL AND turn_id IS NOT NULL
+      ORDER BY project_registration_due_at LIMIT 1`)
+      .get(now) as DeliveryRow | undefined;
+    return row ? toDelivery(row) : null;
+  }
+
+  saveProjectRegistration(
+    id: string,
+    registration: ProjectRegistration,
+    dueAt: string | null,
+  ): void {
+    this.db
+      .prepare(`UPDATE deliveries SET project_registration_json = ?, project_registration_due_at = ?
+      WHERE id = ?`)
+      .run(JSON.stringify(registration), dueAt, id);
   }
 
   markAccepted(id: string, result: { threadId: string; turnId?: string | undefined }): void {
@@ -488,6 +522,9 @@ function toDelivery(row: DeliveryRow): Delivery {
     isReplay: row.is_replay === 1,
     updatedAt: row.updated_at,
     dispatchStarted: row.dispatch_started === 1,
+    projectRegistration: row.project_registration_json
+      ? (JSON.parse(row.project_registration_json) as ProjectRegistration)
+      : null,
     maintenance: row.maintenance_json
       ? (JSON.parse(row.maintenance_json) as MaintenanceReceipt)
       : null,

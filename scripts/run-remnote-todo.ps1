@@ -4,7 +4,6 @@ param(
     [string]$Node = 'C:\Program Files\nodejs\node.exe'
 )
 $ErrorActionPreference = 'Stop'
-if (-not $env:CODEX_THREAD_ID) { throw 'Run this workflow from its native Codex scheduled task or a current Codex Thread.' }
 $log = Join-Path (Split-Path -Parent $Config) 'scheduler.log'
 $maintenanceExit = 0
 $settings = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json

@@ -103,6 +103,7 @@ export const RouteTargetSchema = z.discriminatedUnion("type", [
     maxConcurrent: z.number().int().min(1).max(16).optional(),
     appProjectId: z.string().min(1).optional(),
     appOwnerThreadId: z.string().min(1).optional(),
+    projectPlacement: z.literal("after-turn").optional(),
   }),
 ]);
 
@@ -145,7 +146,9 @@ export const RouteInputSchema = z
     }
     if (
       route.target.type === "new-thread" &&
-      Boolean(route.target.appProjectId) !== Boolean(route.target.appOwnerThreadId)
+      (Boolean(route.target.appProjectId) !== Boolean(route.target.appOwnerThreadId) ||
+        (route.target.projectPlacement &&
+          (!route.target.appProjectId || route.target.promptMode !== "verbatim")))
     ) {
       ctx.addIssue({
         code: "custom",

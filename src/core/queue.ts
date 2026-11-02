@@ -1,14 +1,16 @@
-import type { Delivery, Stores } from "../db/repos.js";
+import type { Delivery, ProjectRegistration, Stores } from "../db/repos.js";
 import type { Logger } from "../logging.js";
 import { CodexNativeAppAdapter } from "../sinks/codex-native-app.js";
 import type { AgentAdapter } from "../sinks/types.js";
 import { BusyError, PermanentError, UnreachableError } from "../sinks/types.js";
+import { registerReleasedThread } from "../workflows/native-project.js";
 import { buildDigestPrompt, buildPrompt } from "./envelope.js";
 import type { WakeEvent } from "./event.js";
 import type { Route } from "./route.js";
 import { DEFAULT_TEMPLATES, renderTemplate, TemplateError, templateFields } from "./template.js";
 
 export interface QueueOptions {
+  registerProject?: typeof registerReleasedThread;
   nativeAppAdapter?: AgentAdapter;
   /** Max deliveries per route per minute before coalescing into a digest. */
   ratePerMinute?: number;
@@ -42,6 +44,8 @@ export class DeliveryQueue {
   private readonly activeRoutes = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
+  private registering = false;
+  private stopped = false;
 
   constructor(
     private readonly stores: Stores,
@@ -58,6 +62,7 @@ export class DeliveryQueue {
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     const recovered = this.stores.deliveries.resetInFlight();
     if (recovered > 0) {
       this.logger.warn({ recovered }, "reset stale in-flight deliveries to queued");
@@ -68,6 +73,7 @@ export class DeliveryQueue {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -130,7 +136,7 @@ export class DeliveryQueue {
     ) {
       throw new PermanentError("route is not enabled for verbatim local prompts");
     }
-    if (route.target.appProjectId && !nativeCallerThreadId)
+    if (route.target.appProjectId && !route.target.projectPlacement && !nativeCallerThreadId)
       throw new PermanentError("native prompts require the current executor Thread identity");
     const delivery = this.stores.deliveries.enqueue({
       routeId: route.id,
@@ -165,10 +171,11 @@ export class DeliveryQueue {
 
   /** One scheduler pass. Public for deterministic tests. */
   async tick(): Promise<void> {
-    if (this.ticking) return;
+    if (this.ticking || this.stopped) return;
     this.ticking = true;
     const jobs: Array<Promise<void>> = [];
     try {
+      jobs.push(this.registerNextProject());
       const ready = this.stores.deliveries.listReady(this.now().toISOString());
       const claimed = new Set<string>();
 
@@ -212,6 +219,40 @@ export class DeliveryQueue {
 
   queueDepth(): number {
     return this.stores.deliveries.countPending();
+  }
+
+  /** Placement is serialized for the desktop window and never re-enters prompt delivery. */
+  private async registerNextProject(): Promise<void> {
+    if (this.registering) return;
+    const delivery = this.stores.deliveries.nextProjectRegistration(this.now().toISOString());
+    const project = delivery?.projectRegistration;
+    if (!delivery?.threadId || !project) return;
+    this.registering = true;
+    try {
+      await (this.options.registerProject ?? registerReleasedThread)(delivery.threadId, project);
+      if (this.stopped) return; // Recover the persisted placement on the next start.
+      const { lastError: _, ...target } = project;
+      this.stores.deliveries.saveProjectRegistration(
+        delivery.id,
+        { ...target, registeredAt: this.now().toISOString() },
+        null,
+      );
+    } catch (error) {
+      if (this.stopped) return;
+      const lastError =
+        error instanceof Error ? error.message : "native project registration failed";
+      this.stores.deliveries.saveProjectRegistration(
+        delivery.id,
+        { ...project, lastError },
+        new Date(this.now().getTime() + 15 * 60_000).toISOString(),
+      );
+      this.logger.warn(
+        { delivery: delivery.id },
+        "project registration deferred; original turn retained",
+      );
+    } finally {
+      this.registering = false;
+    }
   }
 
   private renderPrompt(route: Route, event: WakeEvent): string {
@@ -294,6 +335,27 @@ export class DeliveryQueue {
       return this.adapter.deliverToThread(route.target.threadId, prompt, opts);
     }
     let cwd = route.target.cwd;
+    if (route.target.projectPlacement === "after-turn") {
+      if (
+        this.adapter.name !== "codex-app-server" ||
+        !route.target.appProjectId ||
+        !route.target.appOwnerThreadId
+      )
+        throw new PermanentError(
+          "post-turn project placement requires the private Codex App Server and a saved project",
+        );
+      const project: ProjectRegistration = {
+        projectId: route.target.appProjectId,
+        ownerThreadId: route.target.appOwnerThreadId,
+        cwd,
+      };
+      return this.adapter.startThread(prompt, {
+        ...opts,
+        cwd,
+        privateAppServer: true,
+        onSending: () => this.stores.deliveries.markSending(delivery.id, project),
+      });
+    }
     if (route.target.appProjectId) {
       const caller = delivery.event.payload.nativeCallerThreadId;
       if (typeof caller !== "string" || !caller)

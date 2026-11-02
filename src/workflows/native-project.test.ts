@@ -143,6 +143,39 @@ describe("official app project registration", () => {
     await expect(registry.register("existing", "saved", "D:/work")).rejects.toThrow("differs");
     expect(calls).toEqual(["list_projects"]);
   });
+
+  it("loads the released task once and recovers an already-persisted move without navigating again", async () => {
+    let assigned = false;
+    const calls: string[] = [];
+    const call = async (name: string) => {
+      calls.push(name);
+      if (name === "list_projects")
+        return { projects: [{ projectId: "saved", path: "D:/work", hostId: "local" }] };
+      if (name === "list_threads")
+        return { threads: [{ id: "first", cwd: "D:/work", projectId: assigned ? "saved" : null }] };
+      if (name === "navigate_to_codex_page") return { navigated: true };
+      if (name === "read_thread")
+        return {
+          thread: { id: "first", status: { type: "idle" } },
+          turns: [{ id: "turn", status: "completed" }],
+        };
+      if (name !== "move_thread_to_project") throw new Error(name);
+      assigned = true;
+      return { threadId: "first", projectId: "saved" };
+    };
+    await new NativeProjectRegistry(call).register("first", "saved", "D:/work", true);
+    await new NativeProjectRegistry(call).register("first", "saved", "D:/work", true);
+    expect(calls).toEqual([
+      "list_projects",
+      "list_threads",
+      "navigate_to_codex_page",
+      "read_thread",
+      "move_thread_to_project",
+      "list_threads",
+      "list_projects",
+      "list_threads",
+    ]);
+  });
   it("rejects a successful mutation whose native readback has no project membership", async () => {
     const registry = new NativeProjectRegistry(async (name) => {
       if (name === "list_projects")

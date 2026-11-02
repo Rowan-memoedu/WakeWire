@@ -18,7 +18,7 @@ import {
   type MaintenanceReceipt,
   type NativeCheck,
 } from "./maintenance-types.js";
-import { NativeProjectRegistry, nativeCallerThreadId } from "./native-project.js";
+import { NativeProjectRegistry } from "./native-project.js";
 
 export async function maintenanceApi<T>(
   endpoint: string,
@@ -81,6 +81,7 @@ export async function verifyNativeRoute(config: MaintenanceConfig): Promise<void
     route.promptTemplate ||
     route.target.appProjectId !== native.appProjectId ||
     route.target.appOwnerThreadId !== native.appOwnerThreadId ||
+    route.target.projectPlacement !== "after-turn" ||
     route.target.cwd !== native.cwd
   )
     throw new Error("ordinary native Thread route changed or is unavailable");
@@ -115,10 +116,10 @@ export function nativePrompt(
   requestFile: string,
   entry: string,
 ): string {
-  return `维护 ${repository}，本地源码在 ${localPath}。用户已明确要求按普通本地 Codex Thread 使用 Full access 全部权限，不添加额外执行约束；沿用已有协作约定，需要处理关联项目时一并完成。\n\n${original}\n\n本次交付接入已有 GitHub Actions 与 RemNote 进度：\n将本次各仓库的变更提交并推送到各自的 codex/maintenance-${requestId} 分支。对每个改动仓库运行：\nnode "${entry}" submit "${requestFile}" "该仓库的本地绝对路径" "简洁说明具体修复及行为变化"\n该命令运行 Actions 独立检查，通过后创建或复用 PR，并返回检查结果。依据检查反馈继续修复；需要重新检查相同提交时可在命令末尾加 --retry。全部相关仓库的提交和检查完成后运行：\nnode "${entry}" finalize "${requestFile}"\n同一请求的所有相关 PR 合并后，原 RemNote 任务会自动归档。`;
+  return `维护 ${repository}，本地源码在 ${localPath}。用户已明确要求按普通本地 Codex Thread 使用 Full access 全部权限，不添加额外执行约束；沿用已有协作约定，需要处理关联项目时一并完成。\n\n${original}\n\n本次交付使用已有 GitHub Actions 检查和 PR 流程：\n将本次各仓库的变更提交并推送到各自的 codex/maintenance-${requestId} 分支。对每个改动仓库运行：\nnode "${entry}" submit "${requestFile}" "该仓库的本地绝对路径" "简洁说明具体修复及行为变化"\n该命令运行 Actions 独立检查，通过后创建或复用 PR，并返回检查结果。依据检查反馈继续修复；需要重新检查相同提交时可在命令末尾加 --retry。全部相关仓库的提交和检查完成后运行：\nnode "${entry}" finalize "${requestFile}"\n同一请求的所有相关 PR 合并后，原 RemNote 任务会自动归档。`;
 }
 
-/** The ordinary authenticated prompt intake owns native create_thread and its no-replay receipts. */
+/** The ordinary authenticated prompt intake owns private App Server execution and its original receipts. */
 export async function ensureNativeDelivery(
   config: MaintenanceConfig,
   configFile: string,
@@ -152,7 +153,6 @@ export async function ensureNativeDelivery(
     const entry = fileURLToPath(new URL("./native-maintenance-cli.js", import.meta.url));
     await maintenanceApi(`/api/routes/${routeId}/prompts`, {
       sourceDeliveryId,
-      nativeCallerThreadId: nativeCallerThreadId(),
       prompt: nativePrompt(
         delivery.renderedPrompt ?? "",
         binding.repository,
