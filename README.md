@@ -1,5 +1,8 @@
 # wakewire
 
+协作开发、Agent 提交与合并规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+
 Local workflow integration: [native SDK sessions](docs/workflow-sessions.md), used by KnowledgeClipper and AsyncWorkflow without changing their prompts or native protocol.
 
 Scheduled RemNote tasks: [marked-todo workflow](docs/remnote-todo.md) mechanically exports original task text, uses Windows Task Scheduler and authenticated local prompt delivery, and preserves first-turn receipts. Receiver threads get the original text, with one task-location sentence for child items.

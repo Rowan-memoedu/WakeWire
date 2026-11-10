@@ -1,5 +1,8 @@
 # WakeWire
 
+- 代码提交、PR 合并、同步与共享边界遵守 [CONTRIBUTING.md](CONTRIBUTING.md)。历史任务授权、私人账号及生产数据权限不随源码共享转移给其他成员或 Agent。
+
+
 - This private maintenance fork owns webhook delivery and native SDK session transport; Codex owns all Thread history and execution.
 - Read docs/workflow-sessions.md before changing either connected workflow. Preserve raw JSON-RPC, original prompts, rich inputs, native identities and unknown-result behavior.
 - Source is D:/Projects/WakeWire; installed package is D:/Applications/WakeWire; production home is D:/AppData/WakeWire; acceptance material is D:/Artifacts/WakeWireIntegration.
