@@ -73,7 +73,7 @@ async function verifyRoutes(config: MaintenanceConfig): Promise<void> {
   }
 }
 
-async function verifyRepositories(
+export async function verifyRepositories(
   config: MaintenanceConfig,
   github: GithubMaintenanceClient,
   requireOwner: boolean,
@@ -92,8 +92,14 @@ async function verifyRepositories(
       full_name: string;
       default_branch: string;
     }>(`repos/${repository}`);
-    if (!repo.private || repo.archived || repo.full_name.toLowerCase() !== repository.toLowerCase())
-      throw new Error(`repository is not an active private source: ${repository}`);
+    const requiresPrivate = config.execution !== "native" || repository === config.hub;
+    if (
+      (requiresPrivate && !repo.private) ||
+      repo.archived ||
+      repo.full_name.toLowerCase() !== repository.toLowerCase() ||
+      repo.full_name.split("/")[0]?.toLowerCase() !== owner.toLowerCase()
+    )
+      throw new Error(`repository is not an active authorized source: ${repository}`);
     bases.set(repository, repo.default_branch);
   }
   return bases;

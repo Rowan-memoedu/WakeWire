@@ -1,8 +1,8 @@
 # RemNote 待办定时分发
 
-Windows 计划任务 `WakeWire - RemNote Todo 0200` 每天北京时间 02:00 直接运行 `scripts/run-remnote-todo.ps1`。脚本通过本地 RemNote MCP 扫描配置子树，将行首单个 `%` 标记事项的原文投放给 WakeWire。`%%` 和未标记事项保留原位。
+Windows 计划任务 `WakeWire - RemNote Todo 0200` 每天北京时间 02:00、11:00、17:00 直接运行 `scripts/run-remnote-todo.ps1`。任务名称保留以沿用现有入口。脚本通过本地 RemNote MCP 扫描配置子树，将行首单个 `%` 标记事项的原文投放给 WakeWire。`%%` 和未标记事项保留原位。
 
-配置 `maintenanceConfigFile` 后，同一计划先投放已绑定项目的 GitHub Actions 维护请求；普通待办扫描排除该配置列出的 Document 子树。绑定和 PR 合并归档见 [项目维护](remnote-maintenance.md)。普通待办的原生 Thread 行为保持原有语义。
+配置 `maintenanceConfigFile` 后，同一计划先运行已绑定项目的维护入口；普通待办扫描排除该配置列出的 Document 子树。项目 Document 可以放在独立的维护根文档下，根节点由维护配置单独绑定。绑定和 PR 合并归档见 [项目维护](remnote-maintenance.md)。普通待办的原生 Thread 行为保持原有语义。
 
 本工作流设置 `target.maxConcurrent: 4`，最多并行运行四个独立 Thread；有空位即接收下一项，无需等待其他 Thread 的首轮完成。投放按扫描顺序发起，归位按原任务顺序等待受理确认。单个已有 Thread 的多条投递仍串行，其他未配置并发的路由保持原行为。
 
@@ -28,6 +28,8 @@ node <installed-dist>/workflows/remnote-todo-cli.js check <absolute-config.json>
 `setup` 和 `check` 核验本机配置与服务版本。`run` 或 Windows 计划触发时才消费标记。
 
 Windows 用户须登录，WakeWire 和本地 RemNote 桥接须可用。Project 归属需要 ChatGPT 桌面端中的 Codex 正在运行。扫描结果存储在配置目录的 `last-run.json`。
+
+计划任务直接以隐藏窗口运行 PowerShell，保留子流程的非零退出码，不能用 `conhost --headless` 的退出码代替工作流结果。维护入口和普通待办分别核对各自运行报告的 `errors`；读取失败会记录具体方法及节点 ID，未知投递不会自动重放。
 
 本地路由使用 `promptMode: verbatim`、`sandbox: user-config` 和 `projectPlacement: after-turn`。私有 App Server 采用本机的权限配置。保存的 `appOwnerThreadId` 供桌面工具在首轮结束后办理归属，投放可由独立进程发起。
 

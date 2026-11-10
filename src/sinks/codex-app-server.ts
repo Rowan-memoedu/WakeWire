@@ -172,7 +172,35 @@ export class CodexAppServerAdapter implements AgentAdapter {
       throw err;
     }
 
-    const turn = await completion;
+    // Desktop takeover can end a turn without notifying its original private
+    // writer. Reconcile the same turn on that writer; never resume or resend it.
+    let polling = false;
+    const poll = this.deliveryScoped
+      ? setInterval(async () => {
+          if (polling || !this.turnWaiters.has(threadId)) return;
+          polling = true;
+          try {
+            const snapshot = await this.call<{ thread: { id: string; turns?: Turn[] } }>(
+              rpc,
+              "thread/read",
+              { threadId, includeTurns: true },
+            );
+            const observed = snapshot.thread.turns?.find((turn) => turn.id === turnId);
+            if (snapshot.thread.id === threadId && observed && observed.status !== "inProgress")
+              this.handleNotification("turn/completed", { threadId, turn: observed });
+          } catch {
+            // A read failure is not evidence that the original mutation failed.
+          } finally {
+            polling = false;
+          }
+        }, 30_000)
+      : undefined;
+    let turn: Turn;
+    try {
+      turn = await completion;
+    } finally {
+      clearInterval(poll);
+    }
     if (turn.status === "failed") {
       throw new Error(`turn ${turnId} failed: ${turn.error?.message ?? "unknown error"}`);
     }
