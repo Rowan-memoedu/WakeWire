@@ -13,5 +13,6 @@ if ($settings.maintenanceConfigFile) {
     $maintenanceExit = $LASTEXITCODE
 }
 & $Node $Entry run $Config 2>&1 | Tee-Object -FilePath $log -Append
+$todoExit = $LASTEXITCODE
 if ($maintenanceExit -ne 0) { exit $maintenanceExit }
-exit $LASTEXITCODE
+exit $todoExit

@@ -15,6 +15,7 @@ const harness = vi.hoisted(() => ({
   sessions: [] as Session[],
   autoComplete: true,
   rejectStart: false,
+  readStatus: "inProgress",
 }));
 
 vi.mock("./jsonrpc.js", async (importOriginal) => {
@@ -58,6 +59,13 @@ vi.mock("./jsonrpc.js", async (importOriginal) => {
         if (harness.autoComplete) queueMicrotask(() => this.complete());
         return { turn: { id: `turn-${this.threadId}`, status: "inProgress" } };
       }
+      if (method === "thread/read")
+        return {
+          thread: {
+            id: this.threadId,
+            turns: [{ id: `turn-${this.threadId}`, status: harness.readStatus }],
+          },
+        };
       return {};
     }
     complete(status = "completed") {
@@ -81,9 +89,33 @@ describe("private app-server ownership", () => {
     harness.sessions = [];
     harness.autoComplete = true;
     harness.rejectStart = false;
+    harness.readStatus = "inProgress";
     adapter = new CodexAppServerAdapter(pino({ level: "silent" }), { connection: "spawn" });
   });
   afterEach(() => adapter.close());
+
+  it.each(["completed", "interrupted"])(
+    "reconciles a lost terminal notification: %s",
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        harness.autoComplete = false;
+        harness.readStatus = status;
+        const delivery = adapter.startThread("source", { ...options, privateAppServer: true });
+        const result = delivery.then(
+          () => "completed",
+          () => "interrupted",
+        );
+        await vi.advanceTimersByTimeAsync(30_050);
+        expect(await result).toBe(status);
+        expect(harness.sessions[0]?.methods.filter((m) => m === "turn/start")).toHaveLength(1);
+        expect(harness.sessions[0]?.methods).toContain("thread/read");
+        expect(harness.sessions[0]?.released).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("waits for release before returning the completed thread and can handle the next event", async () => {
     const first = await adapter.startThread("first event", options);

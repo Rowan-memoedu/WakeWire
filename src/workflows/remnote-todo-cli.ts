@@ -80,9 +80,17 @@ export class RemNoteMcp implements RemNoteReader {
     await this.client.close();
   }
   private async call(name: string, args: Record<string, unknown>): Promise<unknown> {
-    return unwrap(
-      await this.client.callTool({ name, arguments: args }, undefined, { timeout: 60_000 }),
-    );
+    try {
+      return unwrap(
+        await this.client.callTool({ name, arguments: args }, undefined, { timeout: 60_000 }),
+      );
+    } catch (error) {
+      const id = args.remId ?? args.parentRemId;
+      const context = typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id) ? ` (${id})` : "";
+      throw new Error(
+        `${name}${context}: ${error instanceof Error ? error.message : "MCP request failed"}`,
+      );
+    }
   }
   async children(parentRemId: string, cursor?: string): Promise<RemPage> {
     return z

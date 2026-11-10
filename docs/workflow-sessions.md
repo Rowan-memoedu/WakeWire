@@ -14,6 +14,8 @@ Client closure, including termination of the SDK's relay process, closes the own
 
 GET /api/health includes workflowSessions.activeSessions. Logs record opened/released sessions, client identity, child PID and native method names only. Thread/Turn identities and all business results are read from the original workflow's durable receipts or the official native history.
 
+Private prompt deliveries also read their original turn on the owning connection every 30 seconds while waiting for completion. This reconciles terminal states when desktop takeover loses the streamed notification; it never resumes a Thread or repeats turn/start. A terminal interrupted turn retains its original receipt and requires an explicit continuation in that same Thread. After a desktop runtime update, verify the exact resolved binary against sessions.codexPaths before reloading the idle gateway; an obsolete approved path does not authorize arbitrary replacement binaries.
+
 On Windows, configure a separate production home, initialize the daemon, set sink.codexPath and sessions.codexPaths, then run scripts/install-windows-service.ps1 from the installed package. It registers the per-user WakeWire logon task using the existing Node runtime and a hidden background host. The task preserves the home path, uses IgnoreNew, and does not start another instance over an existing daemon.
 
 The KnowledgeClipper connector is helpers/codex_chat.py in D:/Projects/RemNote Quick Clipper. Only its native SDK launch changes; its existing pinned runtime, instructions, images, streaming, cancellation, tabs and export contracts remain intact. The deployed helper is loaded for each request, so verified helper-only updates do not require a desktop-app restart.
