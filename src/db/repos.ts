@@ -341,6 +341,29 @@ export class DeliveryStore {
     return row ? toDelivery(row) : null;
   }
 
+  /** Batch recovery stays in the original delivery ledger, without another queue or task store. */
+  pendingCommandBatches(routeId: string, documentRemId: string): Delivery[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM deliveries WHERE route_id = ?
+      AND status <> 'skipped-duplicate' AND is_replay = 0
+      AND json_extract(event_json, '$.payload.commandBatch.documentRemId') = ?
+      AND json_extract(event_json, '$.payload.commandBatch.acknowledgedAt') IS NULL
+      ORDER BY received_at ASC`)
+      .all(routeId, documentRemId) as DeliveryRow[];
+    return rows.map(toDelivery);
+  }
+
+  acknowledgeCommandBatch(id: string): void {
+    const delivery = this.get(id);
+    if (!delivery?.threadId || !delivery.turnId || !delivery.event.payload.commandBatch)
+      throw new Error("batch first turn has not been accepted");
+    this.db
+      .prepare(`UPDATE deliveries SET event_json = json_set(event_json,
+      '$.payload.commandBatch.acknowledgedAt', ?), updated_at = ? WHERE id = ?
+      AND json_extract(event_json, '$.payload.commandBatch.acknowledgedAt') IS NULL`)
+      .run(nowIso(), nowIso(), id);
+  }
+
   /** Deliveries ready to attempt now (queued or held whose backoff expired), oldest first. */
   listReady(nowIsoStr: string = nowIso()): Delivery[] {
     const rows = this.db

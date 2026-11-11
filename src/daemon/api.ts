@@ -15,6 +15,7 @@ import { WebhookMappingSchema } from "../sources/webhook/map.js";
 import { WebhookIngestSource } from "../sources/webhook/source.js";
 import { WebhookVerificationSchema } from "../sources/webhook/verify.js";
 import { VERSION } from "../version.js";
+import { CommandBatchSchema } from "../workflows/remnote-command-batch.js";
 import type { CodexSessionGateway } from "./codex-sessions.js";
 import { maintenanceRouteConflict, mountMaintenanceApi } from "./maintenance-api.js";
 import type { SourceManager } from "./sources.js";
@@ -109,6 +110,8 @@ export function createApi(ctx: ApiContext): Hono {
         sourceDeliveryId: z.string().min(1).max(200),
         prompt: z.string().min(1).max(2_000_000),
         nativeCallerThreadId: z.string().uuid().optional(),
+        developerInstructions: z.string().min(1).max(32_000).optional(),
+        commandBatch: CommandBatchSchema.optional(),
       })
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "invalid prompt delivery" }, 400);
@@ -120,6 +123,8 @@ export function createApi(ctx: ApiContext): Hono {
         parsed.data.sourceDeliveryId,
         parsed.data.prompt,
         parsed.data.nativeCallerThreadId,
+        parsed.data.developerInstructions,
+        parsed.data.commandBatch,
       );
       return c.json({ delivery: delivery ? publicDelivery(delivery) : null }, 202);
     } catch (err) {
@@ -130,6 +135,25 @@ export function createApi(ctx: ApiContext): Hono {
   app.delete("/api/routes/:id", (c) => {
     const removed = ctx.stores.routes.remove(c.req.param("id"));
     return removed ? c.json({ ok: true }) : c.json({ error: "route not found" }, 404);
+  });
+
+  app.get("/api/routes/:id/command-batches", (c) => {
+    const documentRemId = c.req.query("documentRemId");
+    if (!documentRemId) return c.json({ error: "documentRemId required" }, 400);
+    return c.json({
+      deliveries: ctx.stores.deliveries.pendingCommandBatches(c.req.param("id"), documentRemId),
+    });
+  });
+  app.post("/api/deliveries/:id/command-batch/acknowledge", (c) => {
+    try {
+      ctx.stores.deliveries.acknowledgeCommandBatch(c.req.param("id"));
+      return c.json({ acknowledged: true });
+    } catch (error) {
+      return c.json(
+        { error: error instanceof Error ? error.message : "batch acknowledgment failed" },
+        409,
+      );
+    }
   });
 
   app.post("/api/routes/:id/toggle", async (c) => {

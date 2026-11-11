@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { CommandBatch } from "./remnote-command-batch.js";
 
 export interface RemNode {
   remId: string;
@@ -31,6 +32,9 @@ export interface RemNoteReader {
 }
 
 export interface TodoTask {
+  parentRemId?: string;
+  commandBatch?: CommandBatch;
+  developerInstructions?: string;
   taskRemId: string;
   contextRemId: string;
   documentRemId: string;
@@ -54,13 +58,15 @@ export interface TodoDispatcher {
 }
 
 const MARKER = /^(\s*(?:\*\*|__|~~|\*|_)*)%(?!%)(?=\s*\S)/u;
+export const NUMBERED_MARKER = /^(\s*(?:\*\*|__|~~|\*|_)*)%([1-9]\d*)(?!\d)/u;
 const MAINTENANCE = /^(\s*(?:\*\*|__|~~|\*|_)*)%%/u;
 
 export function isMarked(title: string): boolean {
   return MARKER.test(title);
 }
 
-export function displayStartedTitle(title: string): string {
+export function displayStartedTitle(title: string, numbered = false): string {
+  if (numbered && NUMBERED_MARKER.test(title)) return title.replace(NUMBERED_MARKER, "$1");
   return title.replace(MARKER, "$1");
 }
 
@@ -95,13 +101,14 @@ export async function relocateStarted(
   remnote: RemNoteReader,
   documentRemId: string,
   node: RemNode,
+  numbered = false,
 ): Promise<void> {
   const buckets = (await allChildren(remnote, documentRemId)).filter((n) => n.title === "已开始");
   if (buckets.length !== 1) throw new Error("expected one existing 已开始 node in the document");
   const bucket = buckets[0] as RemNode;
-  const expected = node.title.replace(MARKER, "$1").replace(LEGACY_STARTED, "$1");
+  const expected = displayStartedTitle(node.title, numbered).replace(LEGACY_STARTED, "$1");
   // Validate lossless title conversion before moving anything.
-  const writeTitle = startedTitle(node);
+  const writeTitle = startedTitle(node, numbered);
   if (!node.parentRemId) throw new Error("task parent is missing");
   if (node.parentRemId !== bucket.remId) {
     const siblings = await allChildren(remnote, bucket.remId);
@@ -155,6 +162,7 @@ export async function scanTodo(
   documentRemId: string,
   progress: (count: number) => void = () => {},
   excludedRemIds: ReadonlySet<string> = new Set(),
+  numbered = false,
 ): Promise<{ tasks: TodoTask[]; conflicts: string[]; nodeCount: number }> {
   const nodes = new Map<string, RemNode>();
   const pending = [documentRemId];
@@ -207,14 +215,15 @@ export async function scanTodo(
     .filter((node) => !conflicts.has(node.remId))
     .map((node) => ({
       taskRemId: node.remId,
+      parentRemId: node.parentRemId as string,
       contextRemId: isTaskRoot(nodes, node, documentRemId)
         ? node.remId
         : (node.parentRemId as string),
       documentRemId,
       sourceDeliveryId: eventIdFor(documentRemId, node.remId),
       title: node.title,
-      prompt: renderTaskPrompt(nodes, node.remId, documentRemId),
-      subtreeFingerprint: fingerprintTaskNodes(nodes, node.remId),
+      prompt: renderTaskPrompt(nodes, node.remId, documentRemId, numbered),
+      subtreeFingerprint: fingerprintTaskNodes(nodes, node.remId, undefined, numbered),
     }));
   return { tasks, conflicts: [...conflicts], nodeCount: nodes.size };
 }
@@ -224,6 +233,7 @@ export function fingerprintTaskNodes(
   nodes: Map<string, RemNode>,
   taskRemId: string,
   excludedRemId?: string,
+  numbered = false,
 ): string {
   const rows: unknown[] = [];
   const seen = new Set<string>();
@@ -235,8 +245,8 @@ export function fingerprintTaskNodes(
     const headline = node.headline ?? node.title;
     rows.push([
       id,
-      id === taskRemId ? displayStartedTitle(node.title) : node.title,
-      id === taskRemId ? displayStartedTitle(headline) : headline,
+      id === taskRemId ? displayStartedTitle(node.title, numbered) : node.title,
+      id === taskRemId ? displayStartedTitle(headline, numbered) : headline,
       node.inlineRefs ?? [],
     ]);
     for (const child of nodes.values())
@@ -247,9 +257,13 @@ export function fingerprintTaskNodes(
 }
 
 /** Keep Markdown formatting and resolve reference tokens by exact ID, never by title search. */
-export function startedTitle(node: RemNode): string {
+export function startedTitle(node: RemNode, numbered = false): string {
   if (!isMarked(node.title) && !LEGACY_STARTED.test(node.title))
     throw new Error("dispatch marker is no longer present");
+  return displayStartedTitle(losslessTitle(node), numbered).replace(LEGACY_STARTED, "$1");
+}
+
+export function losslessTitle(node: RemNode): string {
   if (node.media?.length || /!\[|<img\b/i.test(node.title)) {
     throw new Error("title contains media; prefix update needs a lossless RichText operation");
   }
@@ -265,7 +279,7 @@ export function startedTitle(node: RemNode): string {
     if (ids?.size !== 1) throw new Error("ambiguous inline reference; title left unchanged");
     return `[[id:${[...ids][0]}]]`;
   });
-  return displayStartedTitle(title).replace(LEGACY_STARTED, "$1");
+  return title;
 }
 
 /** Only a thread AND accepted first turn authorize the visible started marker. */
@@ -273,10 +287,11 @@ export async function acknowledgeStarted(
   remnote: RemNoteReader,
   task: TodoTask,
   receipt: TodoReceipt,
+  numbered = false,
 ): Promise<"marked" | "already-marked" | "changed"> {
   if (!receipt.threadId || !receipt.turnId) throw new Error("first turn has not been acknowledged");
   const current = await remnote.read(task.taskRemId);
-  const expected = displayStartedTitle(task.title);
+  const expected = displayStartedTitle(task.title, numbered);
   if (current.title === expected) {
     const buckets = (await allChildren(remnote, task.documentRemId)).filter(
       (n) => n.title === "已开始",
@@ -286,7 +301,7 @@ export async function acknowledgeStarted(
       : "changed";
   }
   if (current.title !== task.title || !isMarked(current.title)) return "changed";
-  await relocateStarted(remnote, task.documentRemId, current);
+  await relocateStarted(remnote, task.documentRemId, current, numbered);
   return "marked";
 }
 
@@ -301,6 +316,7 @@ export function renderTaskPrompt(
   nodes: Map<string, RemNode>,
   taskRemId: string,
   documentRemId: string,
+  numbered = false,
 ): string {
   const task = nodes.get(taskRemId);
   if (!task) throw new Error("task is missing from the completed source scan");
@@ -316,7 +332,7 @@ export function renderTaskPrompt(
   }
   const visibleText = (node: RemNode): string => {
     let value = node.headline ?? node.title;
-    if (node.remId === taskRemId) value = value.replace(MARKER, "$1");
+    if (node.remId === taskRemId) value = displayStartedTitle(value, numbered);
     for (const ref of node.inlineRefs ?? []) {
       value = value
         .replaceAll(`[[${ref.text}]]`, ref.text)

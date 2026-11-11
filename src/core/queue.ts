@@ -4,6 +4,7 @@ import { CodexNativeAppAdapter } from "../sinks/codex-native-app.js";
 import type { AgentAdapter } from "../sinks/types.js";
 import { BusyError, PermanentError, UnreachableError } from "../sinks/types.js";
 import { registerReleasedThread } from "../workflows/native-project.js";
+import type { CommandBatch } from "../workflows/remnote-command-batch.js";
 import { buildDigestPrompt, buildPrompt } from "./envelope.js";
 import type { WakeEvent } from "./event.js";
 import type { Route } from "./route.js";
@@ -128,6 +129,8 @@ export class DeliveryQueue {
     sourceDeliveryId: string,
     prompt: string,
     nativeCallerThreadId?: string,
+    developerInstructions?: string,
+    commandBatch?: CommandBatch,
   ): Delivery | null {
     if (
       !route.enabled ||
@@ -135,6 +138,22 @@ export class DeliveryQueue {
       route.target.promptMode !== "verbatim"
     ) {
       throw new PermanentError("route is not enabled for verbatim local prompts");
+    }
+    if (developerInstructions && this.adapter.name !== "codex-app-server")
+      throw new PermanentError("workflow instructions require the native Codex App Server");
+    if (commandBatch) {
+      if (!developerInstructions || commandBatch.acknowledgedAt)
+        throw new PermanentError(
+          "new command batches need maintenance instructions and an unacknowledged plan",
+        );
+      const pending = this.stores.deliveries.pendingCommandBatches(
+        route.id,
+        commandBatch.documentRemId,
+      );
+      if (pending.some((d) => d.sourceDeliveryId !== sourceDeliveryId))
+        throw new PermanentError(
+          "this Document already has a pending batch; recover its original receipt",
+        );
     }
     if (route.target.appProjectId && !route.target.projectPlacement && !nativeCallerThreadId)
       throw new PermanentError("native prompts require the current executor Thread identity");
@@ -146,7 +165,11 @@ export class DeliveryQueue {
         deliveryId: sourceDeliveryId,
         occurredAt: this.now().toISOString(),
         summary: "local prompt",
-        payload: nativeCallerThreadId ? { nativeCallerThreadId } : {},
+        payload: {
+          ...(nativeCallerThreadId ? { nativeCallerThreadId } : {}),
+          ...(developerInstructions ? { developerInstructions } : {}),
+          ...(commandBatch ? { commandBatch } : {}),
+        },
       },
       renderedPrompt: prompt,
     });
@@ -325,8 +348,24 @@ export class DeliveryQueue {
   private async deliver(route: Route, delivery: Delivery, prompt: string) {
     if (route.target.type === "github-actions")
       throw new PermanentError("Actions dispatch belongs to the authenticated maintenance intake");
+    const developerInstructions =
+      route.target.type === "new-thread" &&
+      route.target.promptMode === "verbatim" &&
+      delivery.event.kind === "local.prompt" &&
+      typeof delivery.event.payload.developerInstructions === "string"
+        ? delivery.event.payload.developerInstructions
+        : undefined;
+    if (
+      developerInstructions &&
+      (this.adapter.name !== "codex-app-server" ||
+        (route.target.type === "new-thread" &&
+          route.target.appProjectId &&
+          !route.target.projectPlacement))
+    )
+      throw new PermanentError("workflow instructions require the native Codex App Server");
     const opts = {
       sandbox: route.sandbox,
+      ...(developerInstructions ? { developerInstructions } : {}),
       onSending: () => this.stores.deliveries.markSending(delivery.id),
       onAccepted: (result: { threadId: string; turnId?: string | undefined }) =>
         this.stores.deliveries.markAccepted(delivery.id, result),
