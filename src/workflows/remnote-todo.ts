@@ -32,6 +32,7 @@ export interface RemNoteReader {
 }
 
 export interface TodoTask {
+  parentRemId?: string;
   commandBatch?: CommandBatch;
   developerInstructions?: string;
   taskRemId: string;
@@ -214,6 +215,7 @@ export async function scanTodo(
     .filter((node) => !conflicts.has(node.remId))
     .map((node) => ({
       taskRemId: node.remId,
+      parentRemId: node.parentRemId as string,
       contextRemId: isTaskRoot(nodes, node, documentRemId)
         ? node.remId
         : (node.parentRemId as string),

@@ -156,6 +156,20 @@ describe("maintenance batches and sequence advancement", () => {
     expect(later?.title).toBe("%4用户修改");
   });
 
+  it.each(["task-0", "task-1"])(
+    "does not reclaim or renumber a task moved by the user: %s",
+    async (id) => {
+      const f = fixture(["%1首批", "%2后批"]);
+      const plan = maintenanceBatch(await f.scan())?.commandBatch;
+      if (!plan) throw new Error("missing batch");
+      const node = f.nodes.get(id);
+      if (node) node.parentRemId = "outside";
+      await expect(acknowledgeBatch(f.reader, plan, accepted)).rejects.toThrow("moved by user");
+      expect(node?.parentRemId).toBe("outside");
+      expect(node?.title).toBe(id === "task-0" ? "%1首批" : "%2后批");
+    },
+  );
+
   it("orders numerically rather than lexically and leaves original task text intact", async () => {
     const f = fixture(["%10第十批", "**%2 第二批**", "%3第三批"]);
     expect(maintenanceBatch(await f.scan())?.prompt).toBe("- ** 第二批**");

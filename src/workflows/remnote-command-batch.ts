@@ -15,6 +15,7 @@ import {
 
 const MemberSchema = z.object({
   taskRemId: z.string().min(1),
+  parentRemId: z.string().min(1),
   contextRemId: z.string().min(1),
   documentRemId: z.string().min(1),
   sourceDeliveryId: z.string().min(1),
@@ -29,6 +30,7 @@ export const CommandBatchSchema = z
     renumber: z.array(
       z.object({
         remId: z.string().min(1),
+        parentRemId: z.string().min(1),
         originalTitle: z.string(),
         title: z.string(),
         number: z.number().int().positive(),
@@ -74,6 +76,7 @@ export function maintenanceBatch(tasks: TodoTask[]): TodoTask | undefined {
           .filter((t) => (sequence(t.title) ?? 0) > first)
           .map((t) => ({
             remId: t.taskRemId,
+            parentRemId: t.parentRemId as string,
             originalTitle: t.title,
             title: t.title.replace(
               NUMBERED_MARKER,
@@ -117,15 +120,27 @@ export async function acknowledgeBatch(
 ): Promise<void> {
   if (!receipt.threadId || !receipt.turnId) throw new Error("batch first turn is not accepted");
   if (batch.acknowledgedAt) return;
-  for (const member of batch.members)
+  const started = (await allChildren(remnote, batch.documentRemId)).find(
+    (n) => n.title === "已开始",
+  )?.remId;
+  for (const member of batch.members) {
+    const node = await remnote.read(member.taskRemId);
+    if (node.parentRemId !== member.parentRemId && node.parentRemId !== started)
+      throw new Error("batch member moved by user; no placement overwrite");
     if ((await fingerprint(remnote, member.taskRemId)) !== member.subtreeFingerprint)
       throw new Error("batch member changed after export; placement and numbering need review");
+  }
   await ensureStartedBucket(remnote, batch.members[0] as TodoTask);
   for (const member of batch.members)
     if ((await acknowledgeStarted(remnote, member, receipt, true)) === "changed")
       throw new Error("batch member marker or location changed; no new dispatch");
+  for (const member of batch.members)
+    if ((await fingerprint(remnote, member.taskRemId)) !== member.subtreeFingerprint)
+      throw new Error("batch member changed during placement; numbering needs review");
   for (const change of batch.renumber) {
     const current = await remnote.read(change.remId);
+    if (current.parentRemId !== change.parentRemId)
+      throw new Error("later sequence moved by user; no renumber overwrite");
     if (current.title === change.title) continue;
     if (current.title !== change.originalTitle)
       throw new Error("later sequence changed; no renumber overwrite");
