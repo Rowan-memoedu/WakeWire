@@ -10,15 +10,26 @@ import { apiFetch } from "../client.js";
 import type { Route } from "../core/route.js";
 import { VERSION } from "../version.js";
 import { NativeProjectRegistry } from "./native-project.js";
+import { acknowledgeBatch, CommandBatchSchema, maintenanceBatch } from "./remnote-command-batch.js";
+import {
+  type CommandSource,
+  CommandSourceSchema,
+  ensureStartedBucket,
+  findLegacyReceipt,
+  type MaintenanceDocuments,
+  MaintenanceDocumentsSchema,
+  scanCommandSource,
+  verifyCommandSource,
+} from "./remnote-command-sources.js";
 import {
   acknowledgeStarted,
   ensureQueued,
   type RemNode,
   type RemNoteReader,
   type RemPage,
-  scanTodo,
   type TodoDispatcher,
   type TodoReceipt,
+  type TodoTask,
 } from "./remnote-todo.js";
 
 const ConfigSchema = z.object({
@@ -33,8 +44,33 @@ const ConfigSchema = z.object({
   appOwnerThreadId: z.string().optional(),
   waitMinutes: z.number().int().min(1).max(1380).default(1320),
   maintenanceConfigFile: z.string().optional(),
+  maintenanceDocumentsFile: z.string().optional(),
+  legacyReceipts: CommandSourceSchema.shape.legacyReceipts,
 });
 type Config = z.infer<typeof ConfigSchema>;
+
+function commandSources(config: Config): {
+  sources: CommandSource[];
+  maintenance?: MaintenanceDocuments;
+} {
+  const ordinary = CommandSourceSchema.parse({
+    documentRemId: config.documentRemId,
+    title: "一次性命令",
+    legacyReceipts: config.legacyReceipts,
+  });
+  if (!config.maintenanceDocumentsFile) return { sources: [ordinary] };
+  if (!path.isAbsolute(config.maintenanceDocumentsFile))
+    throw new Error("maintenance documents path must be absolute");
+  const maintenance = MaintenanceDocumentsSchema.parse(
+    JSON.parse(fs.readFileSync(config.maintenanceDocumentsFile, "utf8")),
+  );
+  if (
+    maintenance.rootRemId === config.documentRemId ||
+    maintenance.documents.some((s) => s.documentRemId === config.documentRemId)
+  )
+    throw new Error("ordinary and maintenance command sources overlap");
+  return { sources: [ordinary, ...maintenance.documents], maintenance };
+}
 
 const NodeSchema = z.object({
   remId: z.string().min(1),
@@ -265,6 +301,10 @@ async function createDispatcher(config: Config): Promise<TodoDispatcher> {
       await api(`/api/routes/${routeId}/prompts`, {
         sourceDeliveryId: task.sourceDeliveryId,
         prompt: task.prompt,
+        ...(task.commandBatch ? { commandBatch: task.commandBatch } : {}),
+        ...(task.developerInstructions
+          ? { developerInstructions: task.developerInstructions }
+          : {}),
       });
     },
   };
@@ -279,9 +319,11 @@ interface RunReport {
   acknowledged: Array<{ remId: string; threadId: string; turnId: string }>;
   pending: string[];
   errors: Array<{ remId?: string; message: string }>;
+  documents: Array<{ documentRemId: string; title: string; markedTasks: number }>;
+  suppressedLegacy: Array<{ remId: string; deliveryId: string }>;
 }
 
-async function run(config: Config, configFile: string): Promise<void> {
+async function run(config: Config, configFile: string, dryRun = false): Promise<void> {
   const report: RunReport = {
     startedAt: new Date().toISOString(),
     scanned: 0,
@@ -290,8 +332,13 @@ async function run(config: Config, configFile: string): Promise<void> {
     acknowledged: [],
     pending: [],
     errors: [],
+    documents: [],
+    suppressedLegacy: [],
   };
-  const reportFile = path.join(path.dirname(configFile), "last-run.json");
+  const reportFile = path.join(
+    path.dirname(configFile),
+    dryRun ? "last-scan.json" : "last-run.json",
+  );
   const save = () =>
     fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   const remnote = new RemNoteMcp();
@@ -300,34 +347,109 @@ async function run(config: Config, configFile: string): Promise<void> {
     await remnote.connect(config.mcpUrl);
     const dispatcher = await createDispatcher(config);
     const excluded = new Set<string>();
-    if (config.maintenanceConfigFile) {
+    const { sources, maintenance } = commandSources(config);
+    for (const source of sources) excluded.add(source.documentRemId);
+    if (maintenance) excluded.add(maintenance.rootRemId);
+    if (config.maintenanceConfigFile && !maintenance) {
       const { MaintenanceConfigSchema } = await import("./maintenance-types.js");
       const maintenance = MaintenanceConfigSchema.parse(
         JSON.parse(fs.readFileSync(config.maintenanceConfigFile, "utf8")),
       );
       for (const binding of maintenance.bindings) excluded.add(binding.documentRemId);
     }
-    const scan = await scanTodo(
-      remnote,
-      config.documentRemId,
-      (scanned) => console.log(JSON.stringify({ scanned })),
-      excluded,
-    );
-    report.scanned = scan.nodeCount;
-    report.markedTasks = scan.tasks.length;
-    report.prepared = scan.tasks.map((task) => ({
+    const tasks: TodoTask[] = [];
+    for (const source of sources) {
+      try {
+        await verifyCommandSource(
+          remnote,
+          source,
+          source.scope ? maintenance?.rootRemId : undefined,
+        );
+        if (source.scope) {
+          const query = new URLSearchParams({ documentRemId: source.documentRemId });
+          const prior = (
+            await api<{
+              deliveries: Array<
+                TodoReceipt & {
+                  sourceDeliveryId: string;
+                  renderedPrompt: string;
+                  event: { payload: Record<string, unknown> };
+                }
+              >;
+            }>(`/api/routes/${config.routeId}/command-batches?${query}`)
+          ).deliveries;
+          if (prior.length > 1)
+            throw new Error("multiple pending batches in one Document; review original receipts");
+          const delivery = prior[0];
+          if (delivery) {
+            const batch = CommandBatchSchema.parse(delivery.event.payload.commandBatch);
+            tasks.push({
+              ...(batch.members[0] as TodoTask),
+              sourceDeliveryId: delivery.sourceDeliveryId,
+              prompt: delivery.renderedPrompt,
+              commandBatch: batch,
+            });
+            report.documents.push({
+              documentRemId: source.documentRemId,
+              title: source.title,
+              markedTasks: batch.members.length,
+            });
+            continue;
+          }
+        }
+        const scan = await scanCommandSource(remnote, source, excluded, (scanned) =>
+          console.log(JSON.stringify({ documentRemId: source.documentRemId, scanned })),
+        );
+        report.scanned += scan.nodeCount;
+        report.markedTasks += scan.tasks.length;
+        report.documents.push({
+          documentRemId: source.documentRemId,
+          title: source.title,
+          markedTasks: scan.tasks.length,
+        });
+        report.errors.push(
+          ...scan.conflicts.map((remId) => ({
+            remId,
+            message: "overlapping parent/child % markers; left unchanged",
+          })),
+        );
+        const eligible: TodoTask[] = [];
+        for (const task of scan.tasks) {
+          const legacy = await findLegacyReceipt(
+            source,
+            task.taskRemId,
+            async (routeId, sourceDeliveryId) => {
+              const query = new URLSearchParams({
+                routeId,
+                sourceDeliveryId,
+                limit: "1",
+              });
+              return (await api<{ deliveries: TodoReceipt[] }>(`/api/deliveries?${query}`))
+                .deliveries[0];
+            },
+          );
+          if (legacy)
+            report.suppressedLegacy.push({ remId: task.taskRemId, deliveryId: legacy.id });
+          else eligible.push(task);
+        }
+        if (source.scope) {
+          const batch = maintenanceBatch(eligible);
+          if (batch) tasks.push(batch);
+        } else tasks.push(...eligible);
+      } catch (error) {
+        report.errors.push({
+          remId: source.documentRemId,
+          message: error instanceof Error ? error.message : "command source failed",
+        });
+      }
+    }
+    report.prepared = tasks.map((task) => ({
       remId: task.taskRemId,
       promptSha256: crypto.createHash("sha256").update(task.prompt).digest("hex"),
       characters: task.prompt.length,
     }));
-    report.errors.push(
-      ...scan.conflicts.map((remId) => ({
-        remId,
-        message: "overlapping parent/child % markers; left unchanged",
-      })),
-    );
-    const pending = new Map(scan.tasks.map((task) => [task.taskRemId, task]));
-    for (const task of scan.tasks) {
+    const pending = new Map((dryRun ? [] : tasks).map((task) => [task.taskRemId, task]));
+    for (const task of dryRun ? [] : tasks) {
       await ensureQueued(dispatcher, task);
     }
     const deadline = Date.now() + config.waitMinutes * 60_000;
@@ -337,10 +459,26 @@ async function run(config: Config, configFile: string): Promise<void> {
         const receipt = await dispatcher.receipt(task.sourceDeliveryId);
         if (receipt?.threadId && receipt.turnId) {
           try {
-            const status = await acknowledgeStarted(remnote, task, receipt);
-            if (status === "changed")
-              throw new Error("source title changed after scan; left unchanged");
-            report.acknowledged.push({ remId, threadId: receipt.threadId, turnId: receipt.turnId });
+            if (task.commandBatch) {
+              await acknowledgeBatch(remnote, task.commandBatch, receipt);
+              await api(`/api/deliveries/${receipt.id}/command-batch/acknowledge`, {});
+              for (const member of task.commandBatch.members)
+                report.acknowledged.push({
+                  remId: member.taskRemId,
+                  threadId: receipt.threadId,
+                  turnId: receipt.turnId,
+                });
+            } else {
+              await ensureStartedBucket(remnote, task);
+              const status = await acknowledgeStarted(remnote, task, receipt);
+              if (status === "changed")
+                throw new Error("source title changed after scan; left unchanged");
+              report.acknowledged.push({
+                remId,
+                threadId: receipt.threadId,
+                turnId: receipt.turnId,
+              });
+            }
           } catch (error) {
             report.errors.push({
               remId,
@@ -397,8 +535,8 @@ async function run(config: Config, configFile: string): Promise<void> {
 
 async function main(): Promise<void> {
   const [command, configFile] = process.argv.slice(2);
-  if (!configFile || !["setup", "check", "run"].includes(command ?? "")) {
-    throw new Error("usage: node remnote-todo-cli.js setup|check|run <absolute-config.json>");
+  if (!configFile || !["setup", "check", "scan", "run"].includes(command ?? "")) {
+    throw new Error("usage: node remnote-todo-cli.js setup|check|scan|run <absolute-config.json>");
   }
   const config = ConfigSchema.parse(JSON.parse(fs.readFileSync(configFile, "utf8")));
   if (
@@ -411,6 +549,7 @@ async function main(): Promise<void> {
   process.env.WAKEWIRE_HOME = config.wakewireHome;
   if (command === "setup") return setup(config, configFile);
   if (command === "run") return run(config, configFile);
+  if (command === "scan") return run(config, configFile, true);
   await verifyDaemon();
   if (config.appProjectId) {
     const registry = new NativeProjectRegistry(undefined, config.appOwnerThreadId);
@@ -424,7 +563,18 @@ async function main(): Promise<void> {
   try {
     await remnote.connect(config.mcpUrl);
     await createDispatcher(config);
-    console.log(JSON.stringify({ ready: true, version: VERSION, scanned: 0, dispatched: 0 }));
+    const { sources, maintenance } = commandSources(config);
+    for (const source of sources)
+      await verifyCommandSource(remnote, source, source.scope ? maintenance?.rootRemId : undefined);
+    console.log(
+      JSON.stringify({
+        ready: true,
+        version: VERSION,
+        documents: sources.length,
+        scanned: 0,
+        dispatched: 0,
+      }),
+    );
   } finally {
     await remnote.close();
   }

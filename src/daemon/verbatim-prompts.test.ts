@@ -6,7 +6,10 @@ import type { Route } from "../core/route.js";
 import { matchRoutes } from "../core/router.js";
 import { openDatabase } from "../db/db.js";
 import { createStores } from "../db/repos.js";
-import type { AgentAdapter } from "../sinks/types.js";
+import type { AgentAdapter, DeliveryOptions } from "../sinks/types.js";
+import { maintenanceBatch } from "../workflows/remnote-command-batch.js";
+import { CommandSourceSchema, scanCommandSource } from "../workflows/remnote-command-sources.js";
+import type { RemNoteReader } from "../workflows/remnote-todo.js";
 import { createApi } from "./api.js";
 import { SourceManager } from "./sources.js";
 
@@ -16,15 +19,17 @@ function fixture() {
   const config = loadConfig(stores.settings);
   const logger = pino({ level: "silent" });
   const calls: string[] = [];
+  const options: DeliveryOptions[] = [];
   const secrets = { backend: "file" as const, get: () => null, set: () => {}, delete: () => {} };
   const adapter: AgentAdapter = {
-    name: "fake",
+    name: "codex-app-server",
     probe: async () => true,
     async deliverToThread() {
       throw new Error("expected a new thread");
     },
     async startThread(prompt, opts) {
       calls.push(prompt);
+      options.push(opts);
       opts.onSending?.();
       const receipt = { threadId: `thread-${calls.length}`, turnId: `turn-${calls.length}` };
       opts.onAccepted?.(receipt);
@@ -55,10 +60,133 @@ function fixture() {
     sandbox: "user-config",
     enabled: true,
   };
-  return { db, stores, queue, calls, app, headers, input };
+  return { db, stores, queue, calls, options, app, headers, input };
 }
 
 describe("verbatim local prompt delivery", () => {
+  it("retains one pending batch per Document and only acknowledges the original accepted receipt", async () => {
+    const f = fixture();
+    try {
+      const { route } = (await (
+        await f.app.request("/api/routes", {
+          method: "POST",
+          headers: f.headers,
+          body: JSON.stringify(f.input),
+        })
+      ).json()) as { route: Route };
+      const remnote = {
+        children: async (parent: string) => ({
+          children: parent === "doc" ? [{ remId: "task", parentRemId: "doc", title: "%原文" }] : [],
+        }),
+      } as unknown as RemNoteReader;
+      const task = maintenanceBatch(
+        (
+          await scanCommandSource(
+            remnote,
+            CommandSourceSchema.parse({ documentRemId: "doc", title: "维护", scope: "合成范围" }),
+            new Set(),
+          )
+        ).tasks,
+      );
+      if (!task) throw new Error("missing batch");
+      const body = {
+        sourceDeliveryId: task.sourceDeliveryId,
+        prompt: task.prompt,
+        commandBatch: task.commandBatch,
+        developerInstructions: task.developerInstructions,
+      };
+      const result = await f.app.request(`/api/routes/${route.id}/prompts`, {
+        method: "POST",
+        headers: f.headers,
+        body: JSON.stringify(body),
+      });
+      expect(result.status).toBe(202);
+      const { delivery } = (await result.json()) as { delivery: { id: string } };
+      const pending = () => f.stores.deliveries.pendingCommandBatches(route.id, "doc");
+      expect(pending()).toHaveLength(1);
+      const ack = () =>
+        f.app.request(`/api/deliveries/${delivery.id}/command-batch/acknowledge`, {
+          method: "POST",
+          headers: f.headers,
+        });
+      expect((await ack()).status).toBe(409);
+      expect(
+        (
+          await f.app.request(`/api/routes/${route.id}/prompts`, {
+            method: "POST",
+            headers: f.headers,
+            body: JSON.stringify({ ...body, sourceDeliveryId: "different" }),
+          })
+        ).status,
+      ).toBe(400);
+      await f.queue.tick();
+      expect(
+        (
+          await f.app.request(`/api/routes/${route.id}/command-batches?documentRemId=doc`, {
+            headers: f.headers,
+          })
+        ).status,
+      ).toBe(200);
+      expect(pending()[0]?.event.payload.commandBatch).toEqual(task.commandBatch);
+      expect((await ack()).status).toBe(200);
+      expect((await ack()).status).toBe(200);
+      expect(pending()).toHaveLength(0);
+      expect(f.calls).toEqual([task.prompt]);
+    } finally {
+      f.db.close();
+    }
+  });
+  it("keeps per-document instructions out of user text, persists them, and does not leak them to ordinary tasks", async () => {
+    const f = fixture();
+    try {
+      const { route } = (await (
+        await f.app.request("/api/routes", {
+          method: "POST",
+          headers: f.headers,
+          body: JSON.stringify(f.input),
+        })
+      ).json()) as { route: Route };
+      const prompt = "- 原文 $x^2$\n  - 原层级";
+      const instructions = "维护对象：两个项目或一套工作流。";
+      const body = { sourceDeliveryId: "maintenance", prompt, developerInstructions: instructions };
+      expect(
+        (
+          await f.app.request(`/api/routes/${route.id}/prompts`, {
+            method: "POST",
+            body: JSON.stringify(body),
+          })
+        ).status,
+      ).toBe(401);
+      for (const input of [
+        body,
+        { sourceDeliveryId: "ordinary", prompt },
+        { ...body, developerInstructions: "changed" },
+      ]) {
+        expect(
+          (
+            await f.app.request(`/api/routes/${route.id}/prompts`, {
+              method: "POST",
+              headers: f.headers,
+              body: JSON.stringify(input),
+            })
+          ).status,
+        ).toBe(202);
+      }
+      const saved = f.stores.deliveries
+        .list({})
+        .find((d) => d.sourceDeliveryId === "maintenance" && d.status !== "skipped-duplicate");
+      expect(saved).toMatchObject({
+        renderedPrompt: prompt,
+        event: { payload: { developerInstructions: instructions } },
+      });
+      await f.queue.tick();
+      await f.queue.tick();
+      expect(f.calls).toEqual([prompt, prompt]);
+      expect(f.options.map((o) => o.developerInstructions)).toEqual([instructions, undefined]);
+    } finally {
+      f.db.close();
+    }
+  });
   it("requires and preserves the actual executor for native prompts instead of the saved owner", async () => {
     const f = fixture();
     try {

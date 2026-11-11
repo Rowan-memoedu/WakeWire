@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $log = Join-Path (Split-Path -Parent $Config) 'scheduler.log'
 $maintenanceExit = 0
 $settings = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
-if ($settings.maintenanceConfigFile) {
+if ($settings.maintenanceConfigFile -and -not $settings.maintenanceDocumentsFile) {
     $maintenanceEntry = Join-Path (Split-Path -Parent $Entry) 'remnote-maintenance-cli.js'
     & $Node $maintenanceEntry run $settings.maintenanceConfigFile 2>&1 | Tee-Object -FilePath $log -Append
     $maintenanceExit = $LASTEXITCODE

@@ -1,6 +1,8 @@
 import type { SandboxPolicy } from "../core/route.js";
 
 export interface DeliveryOptions {
+  /** Trusted local workflow context, separate from the verbatim user message. */
+  developerInstructions?: string | undefined;
   appProjectId?: string | undefined;
   appOwnerThreadId?: string | undefined;
   /** A dedicated App Server owns the first turn until the native completion notification. */

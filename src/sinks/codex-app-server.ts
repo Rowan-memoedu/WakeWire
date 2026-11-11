@@ -126,6 +126,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     opts.onSending?.();
     const started = await this.call<ThreadResumeResponse>(rpc, "thread/start", {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      ...(opts.developerInstructions ? { developerInstructions: opts.developerInstructions } : {}),
       ...(opts.sandbox === "user-config" ? {} : { sandbox: opts.sandbox, approvalPolicy: "never" }),
       ...(this.config.model ? { model: this.config.model } : {}),
     });

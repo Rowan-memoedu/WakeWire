@@ -94,6 +94,28 @@ describe("private app-server ownership", () => {
   });
   afterEach(() => adapter.close());
 
+  it("adds workflow context through thread/start without replacing base instructions or modifying user input", async () => {
+    const prompt = "- 原文\n  - $x^2$";
+    const instructions = "范围：工作流甲，检查、提交、合并并对齐运行文件。";
+    await adapter.startThread(prompt, {
+      sandbox: "user-config",
+      privateAppServer: true,
+      developerInstructions: instructions,
+    });
+    const requests = harness.sessions[0]?.requests ?? [];
+    const start = requests.find((r) => r.method === "thread/start")?.params;
+    expect(start?.developerInstructions).toBe(instructions);
+    expect(start).not.toHaveProperty("baseInstructions");
+    expect(start).not.toHaveProperty("approvalPolicy");
+    expect(requests.find((r) => r.method === "turn/start")?.params.input).toEqual([
+      { type: "text", text: prompt },
+    ]);
+    await adapter.startThread(prompt, { sandbox: "user-config", privateAppServer: true });
+    expect(
+      harness.sessions[1]?.requests.find((r) => r.method === "thread/start")?.params,
+    ).not.toHaveProperty("developerInstructions");
+  });
+
   it.each(["completed", "interrupted"])(
     "reconciles a lost terminal notification: %s",
     async (status) => {
