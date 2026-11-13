@@ -195,4 +195,6 @@ No native service wrapper in v1.
 See [CONTRIBUTING.md](CONTRIBUTING.md) — includes the manual end-to-end smoke test.
 Design decisions and doc-verification notes: [DECISIONS.md](DECISIONS.md).
 
+Local RemNote publishing: [知乎文章定时发布](docs/remnote-zhihu.md).
+
 MIT licensed.
