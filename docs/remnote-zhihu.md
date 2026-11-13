@@ -8,15 +8,15 @@
 
 发布前重新核对 Document 身份、登录账号、完整子树及原父节点。提交前将不可自动重放的记录落盘并同步到磁盘；任何超时、结果不明或没有明确文章 ID 的响应都会保留记录、停止后续发布，不能通过再次运行 CLI 重发。需要人工核对后恢复时，先找到实际公开内容；不得删除记录绕过去重。
 
-取得 ID 后回读 `https://zhuanlan.zhihu.com/p/<id>` 对应的 API 内容，核对 ID、作者、标题、全部可见文字、列表层级、强调和链接目标，之后才将原 Rem 节点及完整子树移动到 Document 的「已发布」下。移动完成并回读后去掉根节点 `%`；保留原 Rem ID、子节点、内部引用和结构。源内容在发布后被用户修改或移动时停止归档，不覆盖用户改动。回执保留公开 URL。归档失败时再次运行只补做已验证内容的归档；已知 ID 的发布结果可以继续只读核验，结果未知则停止。
+取得 ID 后回读 `https://zhuanlan.zhihu.com/p/<id>` 对应的 API 内容，核对 ID、作者、标题、全部可见文字、列表层级、强调、链接目标和指定专栏的已接受归属，之后才将原 Rem 节点及完整子树移动到 Document 的「已发布」下。移动完成并回读后去掉根节点 `%`；保留原 Rem ID、子节点、内部引用和结构。源内容在发布后被用户修改或移动时停止归档，不覆盖用户改动。回执保留公开 URL。归档失败时再次运行只补做已验证内容的归档；已知 ID 的发布结果可以继续只读核验，结果未知则停止。
 
-文章保留多行文字、Markdown 强调、链接和真实嵌套列表；原始 HTML 作为文字转义，不允许脚本执行。Rem 内部引用只输出可见文字，不跟随读取引用目标。媒体、portal、未解析引用和重叠标记保留原位并报告，不以漏内容的版本发布。标题必填、禁止换行、最多 100 字；正文必填、9～100,000 字。超限时停止，不自动删减、补写或拆分。相同标题与可见正文的重复来源也会被拦截。
+文章保留多行文字、Markdown 强调、链接和真实嵌套列表。空叶节点在正文内容组之间转为空段落分隔，不生成空项目符号；同级内容组首尾的空编辑占位不输出，内部连续空节点保留各自间隔。节点内单换行转为 `<br>`，连续换行保留相应行距，不能依赖 HTML 中会折叠的普通换行。带子树的空容器保留子树层级但不生成空项目符号。回读按可见列表深度、空段落位置、节点内换行及强调/链接所在文字位置核验，允许知乎将子列表移到父 `li` 外侧和将 `strong` 转为 `b`，不把等效 DOM 变化误判为内容变化；原始 HTML 作为文字转义，不允许脚本执行。Rem 内部引用只输出可见文字，不跟随读取引用目标。媒体、portal、未解析引用和重叠标记保留原位并报告，不以漏内容的版本发布。标题必填、禁止换行、最多 100 字；正文必填、9～100,000 字。超限时停止，不自动删减、补写或拆分。相同标题与可见正文的重复来源也会被拦截。
 
 ## 客户端与凭据
 
 已核验官方 `zhihu-cli` 0.6.1 的 `capabilities`，该版本没有文章发布命令。官方发布 Skill 是另一条 OpenAPI 路线，需要独立发布凭据，不能把官方 CLI 的 Access Secret 擅自视为发布授权。
 
-本流程调用维护中的 [BAIGUANGMEI/zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 的 `ZhihuClient`（PyPI 包 `pyzhihu-cli==0.2.4`），复用其创建文章、CSRF 及 API 处理。安装到本机独立 Python 环境：
+本流程调用维护中的 [BAIGUANGMEI/zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 的 `ZhihuClient`（PyPI 包 `pyzhihu-cli==0.2.4`），复用其创建文章、CSRF 及 API 处理。发布前检查配置专栏的管理权限，并仅在原客户端的文章发布请求中设置该专栏；发布后必须回读到同一专栏的 `accepted` 归属。文章已发布但专栏尚未接受时保留文章 ID，不重复发文或提前归档。安装到本机独立 Python 环境：
 
 ```powershell
 python -m venv <runtime-directory>
@@ -36,7 +36,8 @@ python -m venv <runtime-directory>
   "mcpUrl": "http://127.0.0.1:<port>/mcp",
   "python": "<absolute-runtime-python>",
   "cookieSnapshot": "<existing-local-chrome-cookie-snapshot>",
-  "accountId": "<verified-zhihu-account-id>"
+  "accountId": "<verified-zhihu-account-id>",
+  "columnId": "<verified-managed-column-token>"
 }
 ```
 
@@ -45,10 +46,11 @@ node dist/workflows/remnote-zhihu-cli.js check <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js scan <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js preview <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js run <absolute-config.json>
+node dist/workflows/remnote-zhihu-cli.js adopt <absolute-config.json> <source-rem-id> <published-article-id>
 pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <absolute-config.json>
 ```
 
-`check` 为只读扫描及登录核验；`scan` 只读计数；`preview` 将第一篇待发布内容转换为本地 HTML，不触碰知乎草稿或修改 RemNote；只有 `run` 会在指定窗口发布及归档，窗口外仅补做已有记录的恢复。配置目录保存 `state.json`、`last-run.json`、`preview.html` 和 `preview.json`。运行使用进程排他锁，死进程残留锁可恢复，活进程持锁时拒绝并行。
+`check` 为只读扫描及登录核验；`scan` 只读计数；`preview` 将第一篇待发布内容转换为本地 HTML，不触碰知乎草稿或修改 RemNote；只有 `run` 会在指定窗口新建发布，窗口外仅补做已有记录的恢复。`adopt` 用于用户明确指出已手动发布的文章：核对完整正文、可见布局、作者与专栏后，登记实际公开标题和 URL，将原子树归档；它不会新建或修改任何知乎文章。标题可保留作者手动添加的后缀，但工作流不据此自动生成序号或日期。已有回执冲突或对照不符时停止，不靠移除 `%` 隐藏问题。配置目录保存 `state.json`、`last-run.json`、`preview.html` 和 `preview.json`。运行使用进程排他锁，死进程残留锁可恢复，活进程持锁时拒绝并行。
 
 任务以当前登录用户的 Limited 权限隐藏运行，禁止重叠实例，保留实际 Node 子流程的退出码。失败最多间隔 5 分钟重试两次；CLI 的窗口限制和已落盘回执仍约束每次重试，不会再次提交未知结果。注册任务不会立即执行发布。需 Windows 用户已登录、RemNote MCP 在线及现有 Chrome 登录态同步可用；不依赖 ChatGPT 桌面端中的 Codex 保持开启。暂停时停用该 Windows 计划任务，保留本机回执。恢复连接沿用已有 RemNote MCP 启动入口，不重启 RemNote 或用户正在使用的应用。不得通过删除未知结果记录、临时另发、扩大到其他 Document 或补发错过时段绕过限制。
 

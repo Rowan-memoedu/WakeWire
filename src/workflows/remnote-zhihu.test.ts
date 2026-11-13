@@ -3,6 +3,7 @@ import type { RemNode, RemNoteReader } from "./remnote-todo.js";
 import {
   type ArticlePublisher,
   type ArticleState,
+  adoptPublishedArticle,
   publicationSlot,
   runArticles,
   scanArticles,
@@ -61,7 +62,7 @@ function fixture() {
       return { title: rows[0]?.text ?? "", html: `<p>${text}</p>`, text, format: "[]" };
     },
     async check() {
-      return { id: "account", name: "author", urlToken: "author" };
+      return { id: "account", name: "author", urlToken: "author", columnId: "col" };
     },
     async publish() {
       posts++;
@@ -74,6 +75,7 @@ function fixture() {
         title: state.receipts.at(-1)?.title ?? "",
         text: state.receipts.at(-1)?.text ?? "",
         format: "[]",
+        columnIds: ["col"],
         url: `https://zhuanlan.zhihu.com/p/${id}`,
       };
     },
@@ -83,6 +85,7 @@ function fixture() {
     publisher,
     documentRemId: "doc",
     accountId: "account",
+    columnId: "col",
     state,
     save: () => {
       persisted = JSON.stringify(state);
@@ -189,7 +192,12 @@ describe("RemNote to Zhihu publishing", () => {
   });
   it("fails closed when account identity changes", async () => {
     const f = fixture();
-    f.publisher.check = async () => ({ id: "other", name: "other", urlToken: "other" });
+    f.publisher.check = async () => ({
+      id: "other",
+      name: "other",
+      urlToken: "other",
+      columnId: "col",
+    });
     await expect(runArticles(f.options)).rejects.toThrow("account changed");
     expect(f.posts()).toBe(0);
   });
@@ -229,6 +237,7 @@ describe("RemNote to Zhihu publishing", () => {
       title: "wrong",
       text: "wrong",
       format: "[]",
+      columnIds: ["col"],
       url: `https://zhuanlan.zhihu.com/p/${id}`,
     });
     await expect(runArticles(f.options)).rejects.toThrow("readback mismatch");
@@ -296,5 +305,58 @@ describe("RemNote to Zhihu publishing", () => {
     (f.nodes.get("doc") as RemNode).remType = "document";
     f.remnote.children = async () => ({ children: [], hasMore: true });
     await expect(scanArticles(f.remnote, "doc")).rejects.toThrow("pagination");
+  });
+  it("retains a published source until its configured column has accepted it", async () => {
+    const f = fixture();
+    const verify = f.publisher.verify;
+    f.publisher.verify = async (id) => ({ ...(await verify(id)), columnIds: [] });
+    await expect(runArticles(f.options)).rejects.toThrow("readback mismatch");
+    expect(f.state.receipts[0]?.stage).toBe("published");
+    expect(f.nodes.get("one")?.parentRemId).toBe("group");
+    f.publisher.verify = verify;
+    await runArticles(f.options);
+    expect(f.posts()).toBe(1);
+    expect(f.nodes.get("one")?.parentRemId).toBe("published");
+  });
+  it("adopts an explicitly identified matching manual publication without another POST", async () => {
+    const f = fixture();
+    const prepared = await f.publisher.prepare((await snapshotArticle(f.remnote, "one")).nodes);
+    f.publisher.verify = async (id) => ({
+      ...prepared,
+      id,
+      authorId: "account",
+      title: "Author's manual title",
+      columnIds: ["col"],
+      url: `https://zhuanlan.zhihu.com/p/${id}`,
+    });
+    const options = { ...f.options, sourceRemId: "one", articleId: "123" };
+    expect(await adoptPublishedArticle(options)).toMatchObject({
+      status: "adopted",
+      published: 0,
+      archived: 1,
+    });
+    expect(f.posts()).toBe(0);
+    expect(f.nodes.get("one")).toMatchObject({ title: "first", parentRemId: "published" });
+    expect(f.state.receipts[0]?.title).toBe("Author's manual title");
+    expect((await adoptPublishedArticle(options)).status).toBe("already-adopted");
+    expect(f.state.receipts).toHaveLength(1);
+  });
+  it("refuses to adopt a manual article with different layout or column", async () => {
+    const f = fixture();
+    const prepared = await f.publisher.prepare((await snapshotArticle(f.remnote, "one")).nodes);
+    f.publisher.verify = async (id) => ({
+      ...prepared,
+      format: "wrong-layout",
+      id,
+      authorId: "account",
+      columnIds: ["col"],
+      url: `https://zhuanlan.zhihu.com/p/${id}`,
+    });
+    await expect(
+      adoptPublishedArticle({ ...f.options, sourceRemId: "one", articleId: "123" }),
+    ).rejects.toThrow("does not match");
+    expect(f.posts()).toBe(0);
+    expect(f.state.receipts).toHaveLength(0);
+    expect(f.nodes.get("one")?.parentRemId).toBe("group");
   });
 });

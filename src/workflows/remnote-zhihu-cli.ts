@@ -8,6 +8,7 @@ import {
   type ArticleNode,
   type ArticlePublisher,
   type ArticleState,
+  adoptPublishedArticle,
   runArticles,
   scanArticles,
 } from "./remnote-zhihu.js";
@@ -19,6 +20,7 @@ const Config = z.object({
   python: z.string().min(1),
   cookieSnapshot: z.string().min(1),
   accountId: z.string().min(1),
+  columnId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
 });
 type Config = z.infer<typeof Config>;
 
@@ -73,6 +75,7 @@ export class ZhihuPublisher implements ArticlePublisher {
           action,
           snapshotPath: this.config.cookieSnapshot,
           expectedAccountId: this.config.accountId,
+          columnId: this.config.columnId,
           ...args,
         }),
       );
@@ -83,7 +86,7 @@ export class ZhihuPublisher implements ArticlePublisher {
   ): Promise<{ title: string; html: string; text: string; format: string }> {
     return this.call("prepare", { nodes });
   }
-  check(): Promise<{ id: string; name: string; urlToken: string }> {
+  check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }> {
     return this.call("check");
   }
   publish(title: string, html: string): Promise<{ id: string }> {
@@ -95,6 +98,7 @@ export class ZhihuPublisher implements ArticlePublisher {
     title: string;
     text: string;
     format: string;
+    columnIds: string[];
     url: string;
   }> {
     return this.call("verify", { articleId });
@@ -151,6 +155,7 @@ function readState(file: string): ArticleState {
       !r.text ||
       !r.title ||
       !r.format ||
+      !r.columnId ||
       !r.slot ||
       !["submitting", "published", "verified", "archived"].includes(r.stage) ||
       (r.stage !== "submitting" && !/^\d+$/u.test(r.articleId ?? ""))
@@ -161,35 +166,49 @@ function readState(file: string): ArticleState {
 }
 
 async function main(): Promise<void> {
-  const [action, configFile] = process.argv.slice(2);
+  const [action, configFile, sourceRemId, articleId] = process.argv.slice(2);
   if (
     !action ||
-    !["check", "scan", "preview", "run"].includes(action) ||
+    !["check", "scan", "preview", "run", "adopt"].includes(action) ||
     !configFile ||
     !path.isAbsolute(configFile)
   )
-    throw new Error("usage: remnote-zhihu-cli.js check|scan|preview|run <absolute-config.json>");
+    throw new Error(
+      "usage: remnote-zhihu-cli.js check|scan|preview|run|adopt <absolute-config.json> [sourceRemId articleId]",
+    );
   const config = Config.parse(JSON.parse(fs.readFileSync(configFile, "utf8")));
   for (const target of [config.python, config.cookieSnapshot])
     if (!path.isAbsolute(target)) throw new Error("runtime paths must be absolute");
   if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(config.mcpUrl).hostname))
     throw new Error("RemNote endpoint must be loopback");
   const home = path.dirname(configFile);
-  const release = action === "run" ? lock(path.join(home, "run.lock")) : () => {};
+  const release = ["run", "adopt"].includes(action) ? lock(path.join(home, "run.lock")) : () => {};
   const remnote = new RemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);
     const publisher = new ZhihuPublisher(config);
-    if (action === "run") {
+    if (["run", "adopt"].includes(action)) {
       const stateFile = path.join(home, "state.json");
       const state = readState(stateFile);
-      const result = await runArticles({
+      const shared = {
         remnote,
         publisher,
         documentRemId: config.documentRemId,
         accountId: config.accountId,
+        columnId: config.columnId,
         state,
         save: () => atomicJson(stateFile, state),
+      };
+      if (action === "adopt") {
+        if (!sourceRemId || !articleId)
+          throw new Error("adopt requires exact source and published article IDs");
+        console.log(
+          JSON.stringify(await adoptPublishedArticle({ ...shared, sourceRemId, articleId })),
+        );
+        return;
+      }
+      const result = await runArticles({
+        ...shared,
         now: new Date(),
         currentTime: () => new Date(),
       });
@@ -211,6 +230,7 @@ async function main(): Promise<void> {
       if (account.id !== config.accountId)
         throw new Error("configured account does not match current login");
       result.account = { name: account.name, urlToken: account.urlToken };
+      result.columnId = account.columnId;
     }
     if (action === "preview" && scan.sources[0]) {
       const source = scan.sources[0];
