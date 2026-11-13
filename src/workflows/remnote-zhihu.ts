@@ -117,8 +117,7 @@ export async function scanArticles(
   nodeCount: number;
 }> {
   const document = await remnote.read(documentRemId);
-  if (document.remType !== "document" || document.title !== "知乎想法")
-    throw new Error("configured source is no longer the 知乎想法 Document");
+  if (document.remType !== "document") throw new Error("configured source is no longer a Document");
   const sources: ArticleSource[] = [];
   const blocked: string[] = [];
   const seen = new Set<string>();
@@ -225,12 +224,12 @@ export async function runArticles(options: {
   state: ArticleState;
   save: () => void;
   now: Date;
+  currentTime?: () => Date;
 }): Promise<{ status: string; published: number; archived: number; blocked: number }> {
   const { remnote, publisher, documentRemId, accountId, state, save } = options;
   // Verify source identity even if this is an archive-only recovery run.
   const document = await remnote.read(documentRemId);
-  if (document.remType !== "document" || document.title !== "知乎想法")
-    throw new Error("source Document changed");
+  if (document.remType !== "document") throw new Error("source Document changed");
   let archived = 0;
   for (const receipt of state.receipts) {
     if (receipt.stage === "archived") continue;
@@ -287,6 +286,8 @@ export async function runArticles(options: {
     !isMarked(fresh.nodes[0]?.title ?? "")
   )
     throw new Error("source changed before publication");
+  if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
+    return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   const receipt: ArticleReceipt = { source, slot, ...prepared, stage: "submitting" };
   state.receipts.push(receipt);
   save(); // Durable fence BEFORE any mutation; timeout/crash cannot cause another POST.

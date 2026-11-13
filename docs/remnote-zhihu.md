@@ -1,10 +1,10 @@
 # RemNote 知乎文章定时发布
 
-将固定的「知乎想法」Document 中行首单个 `%` 标记的节点及其完整物理子树发布为一篇知乎文章。标记节点自身的可见文字作为文章标题，其下完整物理子树作为正文。来源 Document 保持原名称，不改名。按文档深度优先顺序处理，不附带父项或兄弟项，不摘要、改写或添加话题。`%%` 暂停整棵子树；父子同时标记时保留原位并报告冲突。「已发布」子树完全排除。
+将配置指定的 RemNote Document 中行首单个 `%` 标记的节点及其完整物理子树发布为一篇知乎文章。标记节点自身的可见文字作为文章标题，其下完整物理子树作为正文。用固定 Rem ID 绑定真实 Document，同一 Document 改名不改变发布范围，也不匹配同名普通节点。按文档深度优先顺序处理，不附带父项或兄弟项，不摘要、改写或添加话题。`%%` 暂停整棵子树；父子同时标记时保留原位并报告冲突。「已发布」子树完全排除。
 
 ## 发布与恢复
 
-北京时间每天 11:30、17:30、22:30，由原生 Codex 自动任务触发本 CLI。每个时段最多发布一篇，其余顺延。允许当次任务在 15 分钟内启动；错过窗口不补发，不在恢复开机时集中发布。CLI 不安装另一个 Windows 周期任务，不新建 Codex Thread，也不经过原命令投递路由。
+北京时间每天 11:30、17:30、22:30，由 Windows 计划任务 `WakeWire - RemNote Zhihu Articles` 直接运行 `scripts/run-remnote-zhihu.ps1`，再调用本 CLI。调度模式与“一次性命令”一致，复用同一 WakeWire 仓库及本地 MCP；不使用 Codex 自动任务，不依赖模型定时唤起。每个时段最多发布一篇，其余顺延。允许当次任务在 15 分钟内启动；错过窗口不补发，不在恢复开机时集中发布。原命令工作流保留自己的时段与投递规则。
 
 发布前重新核对 Document 身份、登录账号、完整子树及原父节点。提交前将不可自动重放的记录落盘并同步到磁盘；任何超时、结果不明或没有明确文章 ID 的响应都会保留记录、停止后续发布，不能通过再次运行 CLI 重发。需要人工核对后恢复时，先找到实际公开内容；不得删除记录绕过去重。
 
@@ -32,6 +32,7 @@ python -m venv <runtime-directory>
 ```json
 {
   "documentRemId": "<exact-document-id>",
+  "documentTitle": "<display-name-only>",
   "mcpUrl": "http://127.0.0.1:<port>/mcp",
   "python": "<absolute-runtime-python>",
   "cookieSnapshot": "<existing-local-chrome-cookie-snapshot>",
@@ -44,11 +45,12 @@ node dist/workflows/remnote-zhihu-cli.js check <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js scan <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js preview <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js run <absolute-config.json>
+pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <absolute-config.json>
 ```
 
 `check` 为只读扫描及登录核验；`scan` 只读计数；`preview` 将第一篇待发布内容转换为本地 HTML，不触碰知乎草稿或修改 RemNote；只有 `run` 会在指定窗口发布及归档，窗口外仅补做已有记录的恢复。配置目录保存 `state.json`、`last-run.json`、`preview.html` 和 `preview.json`。运行使用进程排他锁，死进程残留锁可恢复，活进程持锁时拒绝并行。
 
-原生自动任务应只执行已安装的本 CLI，不让模型改写正文、改用网页点击、删除未知结果记录、临时另发、扩大到其他 Document 或补发错过的时段。暂停使用原生自动任务的暂停能力；保留本机回执。恢复连接沿用已有 RemNote MCP 启动入口，不重启 RemNote 或用户正在使用的应用。
+任务以当前登录用户的 Limited 权限隐藏运行，禁止重叠实例，保留实际 Node 子流程的退出码。失败最多间隔 5 分钟重试两次；CLI 的窗口限制和已落盘回执仍约束每次重试，不会再次提交未知结果。注册任务不会立即执行发布。需 Windows 用户已登录、RemNote MCP 在线及现有 Chrome 登录态同步可用；不依赖 ChatGPT 桌面端中的 Codex 保持开启。暂停时停用该 Windows 计划任务，保留本机回执。恢复连接沿用已有 RemNote MCP 启动入口，不重启 RemNote 或用户正在使用的应用。不得通过删除未知结果记录、临时另发、扩大到其他 Document 或补发错过时段绕过限制。
 
 ## 验证
 

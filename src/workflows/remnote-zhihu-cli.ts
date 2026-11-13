@@ -14,6 +14,7 @@ import {
 
 const Config = z.object({
   documentRemId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
+  documentTitle: z.string().optional(),
   mcpUrl: z.url(),
   python: z.string().min(1),
   cookieSnapshot: z.string().min(1),
@@ -190,6 +191,7 @@ async function main(): Promise<void> {
         state,
         save: () => atomicJson(stateFile, state),
         now: new Date(),
+        currentTime: () => new Date(),
       });
       atomicJson(path.join(home, "last-run.json"), { at: new Date().toISOString(), ...result });
       console.log(JSON.stringify(result));

@@ -11,7 +11,7 @@ import {
 
 function fixture() {
   const nodes = new Map<string, RemNode>([
-    ["doc", { remId: "doc", title: "知乎想法", remType: "document" }],
+    ["doc", { remId: "doc", title: "Article Source", remType: "document" }],
     ["published", { remId: "published", title: "已发布", parentRemId: "doc" }],
     ["old", { remId: "old", title: "%archived", parentRemId: "published" }],
     ["group", { remId: "group", title: "PRIVATE PARENT", parentRemId: "doc" }],
@@ -115,6 +115,14 @@ describe("RemNote to Zhihu publishing", () => {
     expect(scan.sources.map((s) => s.remId)).toEqual(["one", "two"]);
     expect(scan.sources[0]?.nodes.map((n) => n.text)).toEqual(["first", "detail text"]);
   });
+  it("keeps the bound Document identity when its display title is renamed", async () => {
+    const f = fixture();
+    (f.nodes.get("doc") as RemNode).title = "Renamed Article Source";
+    expect((await scanArticles(f.remnote, "doc")).sources.map((source) => source.remId)).toEqual([
+      "one",
+      "two",
+    ]);
+  });
   it("keeps ambiguous parent/child markers together and publishes neither", async () => {
     const f = fixture();
     (f.nodes.get("child") as RemNode).title = "%nested";
@@ -166,6 +174,16 @@ describe("RemNote to Zhihu publishing", () => {
     const f = fixture();
     f.options.now = new Date("2026-11-14T02:00:00Z");
     expect((await runArticles(f.options)).status).toBe("outside-window");
+    expect(f.posts()).toBe(0);
+    expect(f.state.receipts).toEqual([]);
+  });
+  it("does not post if scanning outlasts the original publication window", async () => {
+    const f = fixture();
+    const result = await runArticles({
+      ...f.options,
+      currentTime: () => new Date("2026-11-14T03:46:00Z"),
+    });
+    expect(result.status).toBe("window-ended");
     expect(f.posts()).toBe(0);
     expect(f.state.receipts).toEqual([]);
   });
