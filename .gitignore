@@ -26,3 +26,5 @@ secrets.json
 *.pem
 *.p12
 *.pfx
+__pycache__/
+*.py[cod]
