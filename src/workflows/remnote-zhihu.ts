@@ -27,6 +27,7 @@ export interface ArticleReceipt {
   format: string;
   stage: "submitting" | "published" | "verified" | "archived";
   articleId?: string;
+  columnId: string;
   url?: string;
 }
 export interface ArticleState {
@@ -36,7 +37,7 @@ export interface ArticlePublisher {
   prepare(
     nodes: ArticleNode[],
   ): Promise<{ title: string; html: string; text: string; format: string }>;
-  check(): Promise<{ id: string; name: string; urlToken: string }>;
+  check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }>;
   publish(title: string, html: string): Promise<{ id: string }>;
   verify(id: string): Promise<{
     id: string;
@@ -44,6 +45,7 @@ export interface ArticlePublisher {
     title: string;
     text: string;
     format: string;
+    columnIds: string[];
     url: string;
   }>;
 }
@@ -221,6 +223,7 @@ export async function runArticles(options: {
   publisher: ArticlePublisher;
   documentRemId: string;
   accountId: string;
+  columnId: string;
   state: ArticleState;
   save: () => void;
   now: Date;
@@ -243,6 +246,7 @@ export async function runArticles(options: {
         result.title !== receipt.title ||
         result.text !== receipt.text ||
         result.format !== receipt.format ||
+        !result.columnIds.includes(receipt.columnId) ||
         result.url !== `https://zhuanlan.zhihu.com/p/${receipt.articleId}`
       )
         throw new Error("published article readback mismatch");
@@ -279,6 +283,7 @@ export async function runArticles(options: {
     throw new Error("duplicate article content; automatic publication blocked");
   const account = await publisher.check();
   if (account.id !== accountId) throw new Error("publishing account changed");
+  if (account.columnId !== options.columnId) throw new Error("publishing column changed");
   const fresh = await snapshotArticle(remnote, source.remId);
   if (
     fresh.fingerprint !== source.fingerprint ||
@@ -288,7 +293,13 @@ export async function runArticles(options: {
     throw new Error("source changed before publication");
   if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
     return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
-  const receipt: ArticleReceipt = { source, slot, ...prepared, stage: "submitting" };
+  const receipt: ArticleReceipt = {
+    source,
+    slot,
+    ...prepared,
+    columnId: options.columnId,
+    stage: "submitting",
+  };
   state.receipts.push(receipt);
   save(); // Durable fence BEFORE any mutation; timeout/crash cannot cause another POST.
   const result = await publisher.publish(prepared.title, prepared.html);
@@ -304,6 +315,7 @@ export async function runArticles(options: {
     verified.title !== prepared.title ||
     verified.text !== prepared.text ||
     verified.format !== prepared.format ||
+    !verified.columnIds.includes(receipt.columnId) ||
     verified.url !== `https://zhuanlan.zhihu.com/p/${result.id}`
   )
     throw new Error("published article readback mismatch");
@@ -319,4 +331,68 @@ export async function runArticles(options: {
     archived: archived + 1,
     blocked: scan.blocked.length,
   };
+}
+
+/** Register an explicitly identified manual publication without creating/editing a Zhihu article. */
+export async function adoptPublishedArticle(options: {
+  remnote: RemNoteReader;
+  publisher: ArticlePublisher;
+  documentRemId: string;
+  accountId: string;
+  columnId: string;
+  sourceRemId: string;
+  articleId: string;
+  state: ArticleState;
+  save: () => void;
+}): Promise<{ status: string; published: number; archived: number; url: string }> {
+  const { remnote, publisher, state, sourceRemId, articleId } = options;
+  if (!/^\d+$/u.test(articleId)) throw new Error("invalid published article ID");
+  const existing = state.receipts.find(
+    (receipt) => receipt.source.remId === sourceRemId || receipt.articleId === articleId,
+  );
+  if (
+    existing?.stage === "archived" &&
+    existing.articleId === articleId &&
+    existing.source.remId === sourceRemId
+  )
+    return { status: "already-adopted", published: 0, archived: 0, url: existing.url as string };
+  if (existing)
+    throw new Error("source or article already has a receipt; inspect it before adoption");
+  const scan = await scanArticles(remnote, options.documentRemId);
+  const source = scan.sources.find((candidate) => candidate.remId === sourceRemId);
+  if (!source)
+    throw new Error("manual source is not a pending marked subtree in the bound Document");
+  const prepared = await publisher.prepare(source.nodes);
+  const published = await publisher.verify(articleId);
+  if (
+    published.id !== articleId ||
+    published.authorId !== options.accountId ||
+    published.text !== prepared.text ||
+    published.format !== prepared.format ||
+    !published.columnIds.includes(options.columnId) ||
+    published.url !== `https://zhuanlan.zhihu.com/p/${articleId}`
+  )
+    throw new Error(
+      "manual publication does not match the complete source, layout, author and column",
+    );
+  const fresh = await snapshotArticle(remnote, sourceRemId);
+  if (fresh.fingerprint !== source.fingerprint || fresh.parentRemId !== source.parentRemId)
+    throw new Error("source changed during manual publication readback");
+  losslessTitle(source.nodes[0] as ArticleNode);
+  const receipt: ArticleReceipt = {
+    source,
+    slot: `manual:${articleId}`,
+    ...prepared,
+    title: published.title,
+    columnId: options.columnId,
+    articleId,
+    url: published.url,
+    stage: "verified",
+  };
+  state.receipts.push(receipt);
+  options.save();
+  await archiveArticle(remnote, options.documentRemId, receipt);
+  receipt.stage = "archived";
+  options.save();
+  return { status: "adopted", published: 0, archived: 1, url: published.url };
 }

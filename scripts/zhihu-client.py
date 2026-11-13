@@ -6,66 +6,34 @@ import re
 import sys
 import time
 from datetime import datetime
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 
-from markdown_it import MarkdownIt
 from requests.cookies import create_cookie
 from zhihu_cli.client import ZhihuClient
+from zhihu_article_format import (
+    ArticleLayout,
+    format_structure,
+    normalize,
+    prepare as prepare_layout,
+)
 
 logging.disable(logging.CRITICAL)
 
 
-class VisibleText(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-
-    def handle_data(self, data):
-        self.parts.append(data)
-
-
-def normalize(html):
-    parser = VisibleText()
-    parser.feed(html)
-    # Ignore editor whitespace; verify list and inline structure separately.
-    return re.sub(r"[ \t\r\n\f\v]+", "", "".join(parser.parts))
-
-
-class FormatStructure(HTMLParser):
-    """Ignore editor wrappers while verifying list depth, links, and emphasis."""
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.tokens = []
-
-    def handle_starttag(self, tag, attrs):
-        tag = {"b": "strong", "i": "em"}.get(tag, tag)
-        if tag in ("ul", "ol", "li", "strong", "em", "blockquote", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6"):
-            self.tokens.append("+" + tag)
-        if tag == "a":
-            self.tokens.append("link:" + dict(attrs).get("href", ""))
-
-    def handle_endtag(self, tag):
-        tag = {"b": "strong", "i": "em"}.get(tag, tag)
-        if tag in ("ul", "ol", "li", "strong", "em", "blockquote", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6"):
-            self.tokens.append("-" + tag)
-
-
-def format_structure(html):
-    parser = FormatStructure()
-    parser.feed(html)
-    return json.dumps(parser.tokens, ensure_ascii=False)
-
-
 def validate_links(html):
-    parser = FormatStructure()
+    parser = ArticleLayout()
     parser.feed(html)
-    for token in parser.tokens:
-        if token.startswith("link:"):
-            parsed = urlparse(token[5:])
-            if parsed.scheme not in ("http", "https") or not parsed.hostname:
-                raise ValueError("article_link_unsupported")
+    for href in parser.links:
+        parsed = urlparse(href)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("article_link_unsupported")
+
+
+def prepare(nodes):
+    result = prepare_layout(nodes)
+    validate_links(result["html"])
+    return result
 
 
 def load_client(snapshot_path):
@@ -112,44 +80,6 @@ def load_client(snapshot_path):
     return client
 
 
-def prepare(nodes):
-    """The marked root is the title; its physical descendants are the rich body."""
-    md = MarkdownIt("commonmark", {"html": False})
-    root_text = nodes[0]["text"]
-    if "\n" in root_text or "\r" in root_text:
-        raise ValueError("article_title_multiline")
-    parser = VisibleText()
-    parser.feed(md.renderInline(root_text))
-    title = "".join(parser.parts)
-    if not title.strip() or len(title) > 100:
-        raise ValueError("article_title_length")
-    index = 1
-
-    def render_list(depth):
-        nonlocal index
-        parts = ["<ul>"]
-        while index < len(nodes) and nodes[index]["depth"] == depth:
-            node = nodes[index]
-            index += 1
-            parts.append("<li>" + md.render(node["text"]))
-            if index < len(nodes) and nodes[index]["depth"] > depth:
-                if nodes[index]["depth"] != depth + 1:
-                    raise ValueError("article_outline_depth")
-                parts.append(render_list(depth + 1))
-            parts.append("</li>")
-        parts.append("</ul>")
-        return "".join(parts)
-
-    html = render_list(1) if len(nodes) > 1 else ""
-    if index != len(nodes):
-        raise ValueError("article_outline_depth")
-    text = normalize(html)
-    if not 9 <= len(text) <= 100000:
-        raise ValueError("article_body_length")
-    validate_links(html)
-    return {"title": title, "html": html, "text": text, "format": format_structure(html)}
-
-
 def article_id_from_result(result):
     for key in ("id", "article_id"):
         value = str(result.get(key, ""))
@@ -171,15 +101,52 @@ def read_article(client, article_id):
     html = article.get("content", "")
     if not isinstance(html, str) or not html:
         raise ValueError("article_content_missing")
+    columns = {item.get("column", {}).get("url_token") or item.get("column", {}).get("id")
+               for item in article.get("contributions", []) if item.get("state") == "accepted"}
+    # A primary column is accepted only when the server also exposes that accepted contribution.
+    columns.discard(None)
     return {"id": str(article.get("id", "")), "authorId": article.get("author", {}).get("id", ""),
             "title": article.get("title", ""), "text": normalize(html), "format": format_structure(html),
+            "columnIds": sorted(columns),
             "url": f"https://zhuanlan.zhihu.com/p/{article_id}"}
+
+
+def check_column(client, column_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", column_id):
+        raise ValueError("invalid_column_id")
+    column = client._get(f"https://zhuanlan.zhihu.com/api/columns/{column_id}")
+    if (column.get("url_token") or column.get("id")) != column_id or column.get("can_manage") is not True:
+        raise ValueError("column_not_manageable")
+    return {"columnId": column_id, "columnTitle": column.get("title", "")}
+
+
+def publish_in_column(client, title, html, column_id):
+    check_column(client, column_id)
+    original_request = client._session.request
+
+    def request_with_column(method, url, **kwargs):
+        if method.upper() == "PUT" and re.fullmatch(r"https://zhuanlan\.zhihu\.com/api/articles/\d+/publish", url):
+            payload = dict(kwargs.get("json", {}))
+            if payload.get("column") not in (None, column_id):
+                raise ValueError("unexpected_publish_column")
+            payload["column"] = column_id
+            kwargs["json"] = payload
+        return original_request(method, url, **kwargs)
+
+    client._session.request = request_with_column
+    try:
+        # Reuse the pinned client's draft/update/publish flow, changing only the column field.
+        return client.create_article(title, content=html)
+    finally:
+        client._session.request = original_request
 
 
 def main(request):
     action = request["action"]
     if action == "prepare":
-        return prepare(request["nodes"])
+        result = prepare(request["nodes"])
+        validate_links(result["html"])
+        return result
     with load_client(request["snapshotPath"]) as client:
         me = client.get_self_info()
         account = {"id": me.get("id", ""), "name": me.get("name", ""),
@@ -187,12 +154,12 @@ def main(request):
         if not account["id"] or not account["urlToken"]:
             raise ValueError("zhihu_account_unverified")
         if action == "check":
-            return account
+            return {**account, **check_column(client, request["columnId"])}
         if account["id"] != request["expectedAccountId"]:
             raise ValueError("zhihu_account_changed")
         if action == "publish":
             # One attempt only. The caller persists an unknown-result fence before this call.
-            result = client.create_article(request["title"], content=request["html"])
+            result = publish_in_column(client, request["title"], request["html"], request["columnId"])
             return {"id": article_id_from_result(result)}
         if action == "verify":
             return read_article(client, request["articleId"])

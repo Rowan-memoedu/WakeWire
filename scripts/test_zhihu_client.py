@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import time
 import unittest
 from datetime import datetime, timezone
@@ -82,7 +83,11 @@ class AdapterTests(unittest.TestCase):
     def test_public_readback_contains_author_and_visible_text(self):
         client = MagicMock()
         client._get.return_value = {"id": "123", "title": "A title", "state": "published", "author": {"id": "me"}, "content": "<p>One &amp; two</p>"}
-        self.assertEqual(adapter.read_article(client, "123"), {"id": "123", "title": "A title", "authorId": "me", "text": "One&two", "format": "[]", "url": "https://zhuanlan.zhihu.com/p/123"})
+        result = adapter.read_article(client, "123")
+        self.assertEqual(result["text"], "One&two")
+        self.assertEqual(result["authorId"], "me")
+        self.assertEqual(result["columnIds"], [])
+        self.assertEqual(json.loads(result["format"])["blocks"], [{"kind": "paragraph", "depth": 0, "text": "One&two"}])
         client._get.return_value["state"] = "draft"
         with self.assertRaisesRegex(ValueError, "not_published"):
             adapter.read_article(client, "123")
@@ -114,12 +119,15 @@ class AdapterTests(unittest.TestCase):
             calls.append((method.upper(), url))
             if url.endswith("/me"):
                 data = {"id": "me", "url_token": "synthetic"}
+            elif "/columns/" in url:
+                data = {"id": "synthetic-column", "url_token": "synthetic-column", "can_manage": True}
             elif url.endswith("/articles/drafts"):
                 data = {"id": "789"}
             elif url.endswith("/draft"):
                 self.assertEqual(kwargs["json"], {"title": "A title", "content": "<p>Independent body</p>"})
                 data = {}
             elif url.endswith("/publish"):
+                self.assertEqual(kwargs["json"]["column"], "synthetic-column")
                 data = {"id": "789", "state": "published"}
             else:
                 self.fail("unexpected upstream request")
@@ -129,10 +137,77 @@ class AdapterTests(unittest.TestCase):
             return result
 
         with patch.object(adapter, "load_client", return_value=client), patch.object(client._session, "request", side_effect=respond):
-            result = adapter.main({"action": "publish", "snapshotPath": "synthetic", "expectedAccountId": "me", "title": "A title", "html": "<p>Independent body</p>"})
+            result = adapter.main({"action": "publish", "snapshotPath": "synthetic", "expectedAccountId": "me", "title": "A title", "html": "<p>Independent body</p>", "columnId": "synthetic-column"})
         self.assertEqual(result, {"id": "789"})
-        self.assertEqual([method for method, _ in calls], ["GET", "POST", "PATCH", "PUT"])
+        self.assertEqual([method for method, _ in calls], ["GET", "GET", "POST", "PATCH", "PUT"])
         self.assertTrue(all("/pin" not in url for _, url in calls))
+
+    def test_only_accepted_columns_count_as_membership(self):
+        client = MagicMock()
+        client._get.return_value = {"id": "12", "title": "Title", "state": "published", "content": "<p>Published body</p>",
+            "contributions": [{"state": "accepted", "column": {"url_token": "accepted-column"}}, {"state": "pending", "column": {"url_token": "pending-column"}}]}
+        self.assertEqual(adapter.read_article(client, "12")["columnIds"], ["accepted-column"])
+
+    def test_unmanageable_column_blocks_all_article_mutations(self):
+        client = MagicMock()
+        client._get.return_value = {"url_token": "column", "can_manage": False}
+        with self.assertRaisesRegex(ValueError, "not_manageable"):
+            adapter.publish_in_column(client, "Title", "<p>Body text</p>", "column")
+        client.create_article.assert_not_called()
+
+
+class LayoutTests(unittest.TestCase):
+    def prepare(self, rows):
+        return adapter.prepare([{"depth": 0, "text": "Independent title"}] + [{"depth": depth, "text": text} for depth, text in rows])
+
+    def blocks(self, result):
+        return json.loads(result["format"])["blocks"]
+
+    def test_empty_editor_edges_are_omitted_and_inner_blank_is_a_paragraph(self):
+        result = self.prepare([(1, ""), (1, "First section"), (1, ""), (1, "Second section"), (1, ""), (1, " ")])
+        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "item"])
+        self.assertEqual(result["html"].count('class="ztext-empty-paragraph"'), 1)
+        self.assertNotIn("<li></li>", result["html"])
+
+    def test_consecutive_authored_blank_nodes_remain_separate(self):
+        result = self.prepare([(1, "First section"), (1, ""), (1, ""), (1, "Next section")])
+        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "gap", "item"])
+
+    def test_nested_separator_keeps_the_children_at_the_original_depth(self):
+        result = self.prepare([(1, "Parent item"), (2, "First detail"), (2, ""), (2, "Second detail"), (1, "Sibling item")])
+        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)], [("item", 1), ("item", 2), ("gap", 1), ("item", 2), ("item", 1)])
+
+    def test_node_internal_single_and_double_newlines_are_visible_breaks(self):
+        result = self.prepare([(1, "First line\nSecond line\n\nThird line")])
+        self.assertEqual(self.blocks(result)[0]["text"], "Firstline\nSecondline\n\nThirdline")
+        self.assertEqual(len(re.findall(r"<br\s*/?>", result["html"])), 3)
+
+    def test_readback_rejects_missing_newline_even_when_all_words_match(self):
+        first = "<ul><li>First<br>Second text</li></ul>"
+        second = "<ul><li>First Second text</li></ul>"
+        self.assertEqual(adapter.normalize(first), adapter.normalize(second))
+        self.assertNotEqual(adapter.format_structure(first), adapter.format_structure(second))
+
+    def test_readback_accepts_zhihu_reparenting_lists_and_b_tag_normalization(self):
+        valid = "<ul><li><p>Parent <strong>bold</strong></p><ul><li>Child detail</li></ul></li></ul>"
+        native = '<ul><li data-pid="opaque">Parent <b>bold</b></li><ul><li>Child detail</li></ul></ul>'
+        self.assertEqual(adapter.format_structure(valid), adapter.format_structure(native))
+
+    def test_style_offsets_are_visible_text_offsets_not_html_parser_columns(self):
+        wrapped = "<ul>\n<li>Earlier text</li>\n<li><strong>Bold</strong></li></ul>"
+        compact = "<ul><li>Earlier text</li><li><b>Bold</b></li></ul>"
+        self.assertEqual(adapter.format_structure(wrapped), adapter.format_structure(compact))
+
+    def test_blank_structural_container_keeps_descendants_without_empty_bullet(self):
+        result = self.prepare([(1, ""), (2, "A complete nested detail")])
+        self.assertEqual(self.blocks(result), [{"kind": "item", "depth": 2, "list": "ul", "text": "Acompletenesteddetail"}])
+        self.assertNotIn("<li></li>", result["html"])
+
+    def test_wrong_list_depth_and_wrong_blank_position_are_not_equivalent(self):
+        one = '<ul><li>First</li></ul><p class="ztext-empty-paragraph"><br></p><ul><li>Second</li></ul>'
+        two = '<ul><li>First</li><ul><li>Second</li></ul></ul><p><br></p>'
+        self.assertEqual(adapter.normalize(one), adapter.normalize(two))
+        self.assertNotEqual(adapter.format_structure(one), adapter.format_structure(two))
 
 
 if __name__ == "__main__":
