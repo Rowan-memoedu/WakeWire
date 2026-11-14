@@ -2,9 +2,15 @@
 
 将配置指定的 RemNote Document 中行首单个 `%` 标记的节点及其完整物理子树发布为一篇知乎文章。标记节点自身的可见文字作为文章标题，其下完整物理子树作为正文。用固定 Rem ID 绑定真实 Document，同一 Document 改名不改变发布范围，也不匹配同名普通节点。按文档深度优先顺序处理，不附带父项或兄弟项，不摘要、改写或添加话题。`%%` 暂停整棵子树；父子同时标记时保留原位并报告冲突。「已发布」子树完全排除。
 
+配置 `publishedTagRemId` 后，同一次扫描还会按该 Document 的精确 Rem ID 查询直接使用它作 tag 的节点。外部母节点必须同时具有这个 tag 和行首单个 `%`；只有 tag 时保留为待写内容，只有 `%` 时不扩展到无关位置。母节点自身作为标题，完整物理子树作为正文；支持其他 Document 内及知识库根级的位置。按原 Document 内容优先、外部节点 ID 稳定排序并入同一队列，共享原时段、锁和去重回执。Document 内的同一节点即使也带 tag，仍只按原 Document 流程处理一次；嵌套就绪来源、截断的 tag 搜索及异常分页会被拦截。
+
+外部来源成功发布并核验后保留原位置：先添加 `publishedTagRemId` 指向的「已发布」tag 并回读，再移除 Document 的触发 tag 并回读，最后清除 `%` 并再次核对全文、层级、原父节点和其他 tag。两个 tag 均按节点 ID 操作，完成 tag 必须确实是该 Document 直属的「已发布」节点，不按同名 tag 猜测。中断后只继续完成 tag 切换或去标记，不再次发文；原 Document 内来源仍沿用整棵移动归档。
+
 ## 发布与恢复
 
 北京时间每天 11:30、17:30、22:30，由 Windows 计划任务 `WakeWire - RemNote Zhihu Articles` 直接运行 `scripts/run-remnote-zhihu.ps1`，再调用本 CLI。调度模式与“一次性命令”一致，复用同一 WakeWire 仓库及本地 MCP；不使用 Codex 自动任务，不依赖模型定时唤起。每个时段最多发布一篇，其余顺延。允许当次任务在 15 分钟内启动；错过窗口不补发，不在恢复开机时集中发布。原命令工作流保留自己的时段与投递规则。
+
+决策工作台「运行与调度」复用同一个 Windows 任务的身份、启停与运行入口，不新建定时器。工作台绑定配置中的 `reportFile` 指向本流程 `last-run.json`，用于回读最新业务状态；运行失败也写入新的错误状态与完成时间，避免旧成功回执掩盖本次失败。
 
 发布前重新核对 Document 身份、登录账号、完整子树及原父节点。提交前将不可自动重放的记录落盘并同步到磁盘；任何超时、结果不明或没有明确文章 ID 的响应都会保留记录、停止后续发布，不能通过再次运行 CLI 重发。需要人工核对后恢复时，先找到实际公开内容；不得删除记录绕过去重。
 
@@ -40,7 +46,8 @@ python -m venv <runtime-directory>
   "cookieSnapshot": "<existing-local-chrome-cookie-snapshot>",
   "accountId": "<verified-zhihu-account-id>",
   "columnId": "<verified-managed-column-token>",
-  "seriesStartDate": "<YYYY-MM-DD-in-Shanghai>"
+  "seriesStartDate": "<YYYY-MM-DD-in-Shanghai>",
+  "publishedTagRemId": "<exact-published-child-rem-id>"
 }
 ```
 

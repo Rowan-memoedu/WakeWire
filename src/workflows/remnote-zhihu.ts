@@ -8,7 +8,23 @@ import {
   type RemNoteReader,
 } from "./remnote-todo.js";
 
-export interface ArticleNode extends RemNode {
+export interface ArticleRem extends RemNode {
+  tags?: Array<{ tagRemId: string; name: string }> | undefined;
+}
+export interface ArticleReader extends RemNoteReader {
+  read(remId: string): Promise<ArticleRem>;
+  tagged?(
+    tagRemId: string,
+    cursor?: string,
+  ): Promise<{
+    results: ArticleRem[];
+    hasMore?: boolean | undefined;
+    nextCursor?: string | undefined;
+    truncated?: boolean | undefined;
+  }>;
+  updateTags?(remId: string, add: string[], remove: string[]): Promise<void>;
+}
+export interface ArticleNode extends ArticleRem {
   depth: number;
   text: string;
 }
@@ -17,6 +33,7 @@ export interface ArticleSource {
   parentRemId: string;
   fingerprint: string;
   nodes: ArticleNode[];
+  tagTrigger?: { triggerTagRemId: string; publishedTagRemId: string };
 }
 export interface ArticleReceipt {
   source: ArticleSource;
@@ -56,7 +73,7 @@ export interface ArticleDraft {
 }
 
 export async function saveReviewDraft(options: {
-  remnote: RemNoteReader;
+  remnote: ArticleReader;
   publisher: ArticlePublisher;
   documentRemId: string;
   accountId: string;
@@ -66,6 +83,7 @@ export async function saveReviewDraft(options: {
   save: () => void;
   now: Date;
   sourceRemId?: string;
+  publishedTagRemId?: string;
 }): Promise<{
   status: string;
   id: string;
@@ -82,7 +100,7 @@ export async function saveReviewDraft(options: {
     !publisher.writeDraft
   )
     throw new Error("cloud draft capabilities are unavailable");
-  const scan = await scanArticles(remnote, options.documentRemId);
+  const scan = await scanArticles(remnote, options.documentRemId, options.publishedTagRemId);
   const source = scan.sources.find(
     (candidate) =>
       !state.receipts.some((receipt) => receipt.source.remId === candidate.remId) &&
@@ -263,8 +281,9 @@ function fingerprint(nodes: ArticleNode[]): string {
 }
 
 export async function snapshotArticle(
-  remnote: RemNoteReader,
+  remnote: ArticleReader,
   remId: string,
+  allowRoot = false,
 ): Promise<ArticleSource> {
   const nodes: ArticleNode[] = [];
   const seen = new Set<string>();
@@ -286,23 +305,49 @@ export async function snapshotArticle(
   };
   await visit(remId, 0);
   const root = nodes[0];
-  if (!root?.parentRemId) throw new Error("article root parent is missing");
-  return { remId, parentRemId: root.parentRemId, fingerprint: fingerprint(nodes), nodes };
+  if (!root || (!root.parentRemId && !allowRoot)) throw new Error("article root parent is missing");
+  return { remId, parentRemId: root.parentRemId ?? "", fingerprint: fingerprint(nodes), nodes };
+}
+
+function hasTag(node: ArticleRem, tagRemId: string): boolean {
+  return node.tags?.some((tag) => tag.tagRemId === tagRemId) ?? false;
+}
+
+async function sourceSnapshot(
+  remnote: ArticleReader,
+  source: ArticleSource,
+): Promise<ArticleSource> {
+  return snapshotArticle(remnote, source.remId, Boolean(source.tagTrigger));
+}
+
+async function validatePublishedTag(
+  remnote: ArticleReader,
+  documentRemId: string,
+  tagRemId: string,
+): Promise<void> {
+  const node = await remnote.read(tagRemId);
+  if (node.parentRemId !== documentRemId || node.title !== "已发布" || node.remType === "portal")
+    throw new Error("published tag is not the bound Document's 已发布 node");
 }
 
 export async function scanArticles(
-  remnote: RemNoteReader,
+  remnote: ArticleReader,
   documentRemId: string,
+  publishedTagRemId?: string,
 ): Promise<{
   sources: ArticleSource[];
   blocked: string[];
   nodeCount: number;
+  taggedCount?: number;
+  taggedAwaitingMarker?: number;
 }> {
   const document = await remnote.read(documentRemId);
   if (document.remType !== "document") throw new Error("configured source is no longer a Document");
   const sources: ArticleSource[] = [];
   const blocked: string[] = [];
   const seen = new Set<string>();
+  let taggedCount = 0;
+  let taggedAwaitingMarker = 0;
   const visit = async (parent: string): Promise<void> => {
     for (const child of await allChildren(remnote, parent)) {
       if (seen.has(child.remId) || child.parentRemId !== parent)
@@ -315,7 +360,7 @@ export async function scanArticles(
       )
         continue;
       if (child.remType === "portal") {
-        blocked.push(child.remId);
+        if (isMarked(child.title)) blocked.push(child.remId);
         continue;
       }
       if (isMarked(child.title)) {
@@ -329,7 +374,88 @@ export async function scanArticles(
     }
   };
   await visit(documentRemId);
-  return { sources, blocked, nodeCount: seen.size };
+  if (publishedTagRemId) {
+    if (!remnote.tagged || !remnote.updateTags)
+      throw new Error("tag source capabilities are unavailable");
+    await validatePublishedTag(remnote, documentRemId, publishedTagRemId);
+    const tagged = new Map<string, ArticleRem>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await remnote.tagged(documentRemId, cursor);
+      if (page.truncated) throw new Error("tag search was truncated; scan stopped");
+      for (const node of page.results) {
+        if (tagged.has(node.remId)) throw new Error("duplicate tag search result");
+        tagged.set(node.remId, await remnote.read(node.remId));
+        if (tagged.size > 20000) throw new Error("tag sources exceed safety bounds");
+      }
+      if (!page.hasMore) break;
+      if (!page.nextCursor || cursors.has(page.nextCursor))
+        throw new Error("invalid tag search cursor");
+      cursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    } while (cursor);
+    const eligible = new Set(
+      [...tagged.values()]
+        .filter(
+          (node) =>
+            isMarked(node.title) && hasTag(node, documentRemId) && !hasTag(node, publishedTagRemId),
+        )
+        .map((node) => node.remId),
+    );
+    taggedCount = tagged.size;
+    taggedAwaitingMarker = [...tagged.values()].filter(
+      (node) =>
+        hasTag(node, documentRemId) &&
+        !hasTag(node, publishedTagRemId) &&
+        !isMarked(node.title) &&
+        !/^\s*%%/u.test(node.title),
+    ).length;
+    for (const id of [...eligible].sort()) {
+      try {
+        if (id === documentRemId) continue;
+        let parent = tagged.get(id)?.parentRemId;
+        const ancestors = new Set<string>([id]);
+        let excluded = false;
+        while (parent) {
+          if (parent === documentRemId) {
+            excluded = true;
+            break;
+          }
+          if (ancestors.has(parent) || ancestors.size > 200)
+            throw new Error("invalid source ancestry");
+          ancestors.add(parent);
+          const node = await remnote.read(parent);
+          if (/^\s*%%/u.test(node.title)) {
+            excluded = true;
+            break;
+          }
+          if (eligible.has(parent)) throw new Error("overlapping tag sources");
+          parent = node.parentRemId;
+        }
+        if (excluded) continue;
+        const source = await snapshotArticle(remnote, id, true);
+        const root = source.nodes[0] as ArticleNode;
+        if (
+          !isMarked(root.title) ||
+          !hasTag(root, documentRemId) ||
+          hasTag(root, publishedTagRemId)
+        )
+          throw new Error("tag source changed during scan");
+        source.tagTrigger = { triggerTagRemId: documentRemId, publishedTagRemId };
+        sources.push(source);
+      } catch {
+        blocked.push(id);
+      }
+    }
+    for (const id of tagged.keys()) seen.add(id);
+  }
+  return {
+    sources,
+    blocked: [...new Set(blocked)],
+    nodeCount: seen.size,
+    ...(publishedTagRemId ? { taggedCount, taggedAwaitingMarker } : {}),
+  };
 }
 
 /** Exact local date/window; late wakeups cannot burst-post missed windows. */
@@ -357,13 +483,13 @@ export function publicationSlot(now: Date): string | undefined {
 }
 
 export async function archiveArticle(
-  remnote: RemNoteReader,
+  remnote: ArticleReader,
   documentRemId: string,
   receipt: ArticleReceipt,
 ): Promise<void> {
   if (receipt.stage !== "verified") throw new Error("publication has not been verified");
   const source = receipt.source;
-  const current = await snapshotArticle(remnote, source.remId);
+  const current = await sourceSnapshot(remnote, source);
   if (current.fingerprint !== source.fingerprint)
     throw new Error("source changed after publication; archive paused");
   const root = current.nodes[0] as ArticleNode;
@@ -371,6 +497,56 @@ export async function archiveArticle(
   const cleared = displayStartedTitle(original.title);
   if (root.title !== original.title && root.title !== cleared)
     throw new Error("source marker changed");
+  if (source.tagTrigger) {
+    const { triggerTagRemId, publishedTagRemId } = source.tagTrigger;
+    if (triggerTagRemId !== documentRemId || !remnote.updateTags)
+      throw new Error("external tag route changed");
+    await validatePublishedTag(remnote, documentRemId, publishedTagRemId);
+    if (current.parentRemId !== source.parentRemId)
+      throw new Error("external source moved after publication");
+    if (!hasTag(root, triggerTagRemId) && !hasTag(root, publishedTagRemId))
+      throw new Error("external trigger removed before completion");
+    const otherTags = (original.tags ?? []).filter(
+      (tag) => ![triggerTagRemId, publishedTagRemId].includes(tag.tagRemId),
+    );
+    const preservesOtherTags = (node: ArticleRem) =>
+      otherTags.every((tag) => hasTag(node, tag.tagRemId));
+    if (!preservesOtherTags(root)) throw new Error("external source's other tags changed");
+    const title = displayStartedTitle(losslessTitle(original));
+    if (!hasTag(root, publishedTagRemId))
+      await remnote.updateTags(source.remId, [publishedTagRemId], []);
+    const added = await sourceSnapshot(remnote, source);
+    if (
+      added.fingerprint !== source.fingerprint ||
+      added.parentRemId !== source.parentRemId ||
+      !hasTag(added.nodes[0] as ArticleNode, publishedTagRemId) ||
+      !preservesOtherTags(added.nodes[0] as ArticleNode)
+    )
+      throw new Error("published tag readback mismatch");
+    if (hasTag(added.nodes[0] as ArticleNode, triggerTagRemId))
+      await remnote.updateTags(source.remId, [], [triggerTagRemId]);
+    const switched = await sourceSnapshot(remnote, source);
+    if (
+      switched.fingerprint !== source.fingerprint ||
+      switched.parentRemId !== source.parentRemId ||
+      !hasTag(switched.nodes[0] as ArticleNode, publishedTagRemId) ||
+      hasTag(switched.nodes[0] as ArticleNode, triggerTagRemId) ||
+      !preservesOtherTags(switched.nodes[0] as ArticleNode)
+    )
+      throw new Error("trigger tag removal readback mismatch");
+    if (switched.nodes[0]?.title === original.title) await remnote.updateTitle(source.remId, title);
+    const final = await sourceSnapshot(remnote, source);
+    if (
+      final.fingerprint !== source.fingerprint ||
+      final.parentRemId !== source.parentRemId ||
+      final.nodes[0]?.title !== cleared ||
+      !hasTag(final.nodes[0] as ArticleNode, publishedTagRemId) ||
+      hasTag(final.nodes[0] as ArticleNode, triggerTagRemId) ||
+      !preservesOtherTags(final.nodes[0] as ArticleNode)
+    )
+      throw new Error("external publication completion readback mismatch");
+    return;
+  }
   const buckets = (await allChildren(remnote, documentRemId)).filter((n) => n.title === "已发布");
   if (buckets.length > 1) throw new Error("multiple 已发布 nodes");
   let bucketId = buckets[0]?.remId;
@@ -399,7 +575,7 @@ export async function archiveArticle(
 }
 
 export async function runArticles(options: {
-  remnote: RemNoteReader;
+  remnote: ArticleReader;
   publisher: ArticlePublisher;
   documentRemId: string;
   accountId: string;
@@ -409,6 +585,7 @@ export async function runArticles(options: {
   now: Date;
   currentTime?: () => Date;
   seriesStartDate?: string;
+  publishedTagRemId?: string;
 }): Promise<{ status: string; published: number; archived: number; blocked: number }> {
   const { remnote, publisher, documentRemId, accountId, state, save } = options;
   // Verify source identity even if this is an archive-only recovery run.
@@ -458,7 +635,7 @@ export async function runArticles(options: {
   if (!slot) return { status: "outside-window", published: 0, archived, blocked: 0 };
   if (state.receipts.some((r) => r.slot === slot))
     return { status: "slot-consumed", published: 0, archived, blocked: 0 };
-  const scan = await scanArticles(remnote, documentRemId);
+  const scan = await scanArticles(remnote, documentRemId, options.publishedTagRemId);
   const completed = new Set(state.receipts.map((r) => r.source.remId));
   const held = new Set(
     (state.drafts ?? [])
@@ -510,13 +687,19 @@ export async function runArticles(options: {
   const account = await publisher.check();
   if (account.id !== accountId) throw new Error("publishing account changed");
   if (account.columnId !== options.columnId) throw new Error("publishing column changed");
-  const fresh = await snapshotArticle(remnote, source.remId);
+  const fresh = await sourceSnapshot(remnote, source);
   if (
     fresh.fingerprint !== source.fingerprint ||
     fresh.parentRemId !== source.parentRemId ||
     !isMarked(fresh.nodes[0]?.title ?? "")
   )
     throw new Error("source changed before publication");
+  if (
+    source.tagTrigger &&
+    (!hasTag(fresh.nodes[0] as ArticleNode, source.tagTrigger.triggerTagRemId) ||
+      hasTag(fresh.nodes[0] as ArticleNode, source.tagTrigger.publishedTagRemId))
+  )
+    throw new Error("source trigger changed before publication");
   if (publicationSlot(options.currentTime?.() ?? options.now) !== slot)
     return { status: "window-ended", published: 0, archived, blocked: scan.blocked.length };
   if (options.seriesStartDate) {
@@ -600,7 +783,7 @@ export async function runArticles(options: {
 
 /** Register an explicitly identified manual publication without creating/editing a Zhihu article. */
 export async function adoptPublishedArticle(options: {
-  remnote: RemNoteReader;
+  remnote: ArticleReader;
   publisher: ArticlePublisher;
   documentRemId: string;
   accountId: string;
@@ -609,6 +792,7 @@ export async function adoptPublishedArticle(options: {
   articleId: string;
   state: ArticleState;
   save: () => void;
+  publishedTagRemId?: string;
 }): Promise<{ status: string; published: number; archived: number; url: string }> {
   const { remnote, publisher, state, sourceRemId, articleId } = options;
   if (!/^\d+$/u.test(articleId)) throw new Error("invalid published article ID");
@@ -623,7 +807,7 @@ export async function adoptPublishedArticle(options: {
     return { status: "already-adopted", published: 0, archived: 0, url: existing.url as string };
   if (existing)
     throw new Error("source or article already has a receipt; inspect it before adoption");
-  const scan = await scanArticles(remnote, options.documentRemId);
+  const scan = await scanArticles(remnote, options.documentRemId, options.publishedTagRemId);
   const source = scan.sources.find((candidate) => candidate.remId === sourceRemId);
   if (!source)
     throw new Error("manual source is not a pending marked subtree in the bound Document");
@@ -640,7 +824,7 @@ export async function adoptPublishedArticle(options: {
     throw new Error(
       "manual publication does not match the complete source, layout, author and column",
     );
-  const fresh = await snapshotArticle(remnote, sourceRemId);
+  const fresh = await sourceSnapshot(remnote, source);
   if (fresh.fingerprint !== source.fingerprint || fresh.parentRemId !== source.parentRemId)
     throw new Error("source changed during manual publication readback");
   losslessTitle(source.nodes[0] as ArticleNode);
