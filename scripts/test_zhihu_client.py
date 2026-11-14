@@ -251,22 +251,22 @@ class LayoutTests(unittest.TestCase):
 
     def test_empty_editor_edges_are_omitted_and_inner_blank_is_a_paragraph(self):
         result = self.prepare([(1, ""), (1, "First section"), (1, ""), (1, "Second section"), (1, ""), (1, " ")])
-        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "item"])
-        self.assertEqual(result["html"].count('class="ztext-empty-paragraph"'), 1)
+        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "item", "gap"])
+        self.assertEqual(result["html"].count('class="ztext-empty-paragraph"'), 2)
         self.assertNotIn("<li></li>", result["html"])
 
     def test_consecutive_authored_blank_nodes_remain_separate(self):
         result = self.prepare([(1, "First section"), (1, ""), (1, ""), (1, "Next section")])
-        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "gap", "item"])
+        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "gap", "item", "gap"])
 
     def test_nested_separator_keeps_the_children_at_the_original_depth(self):
         result = self.prepare([(1, "Parent item"), (2, "First detail"), (2, ""), (2, "Second detail"), (1, "Sibling item")])
-        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)], [("item", 1), ("item", 2), ("gap", 1), ("item", 2), ("item", 1)])
+        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)], [("item", 1), ("item", 2), ("gap", 1), ("item", 2), ("item", 1), ("gap", 0)])
 
     def test_node_internal_single_and_double_newlines_are_visible_breaks(self):
         result = self.prepare([(1, "First line\nSecond line\n\nThird line")])
         self.assertEqual(self.blocks(result)[0]["text"], "Firstline\nSecondline\n\nThirdline")
-        self.assertEqual(len(re.findall(r"<br\s*/?>", result["html"])), 3)
+        self.assertEqual(len(re.findall(r"<br\s*/?>", result["html"])), 4)
 
     def test_readback_rejects_missing_newline_even_when_all_words_match(self):
         first = "<ul><li>First<br>Second text</li></ul>"
@@ -284,9 +284,9 @@ class LayoutTests(unittest.TestCase):
         # the real editor. An outline return must close only the child <ul>.
         result = self.prepare([(1, "Parent section"), (2, "First child"), (3, "Deep detail"),
                                (2, "Second child"), (1, ""), (1, "Last section")])
-        self.assertEqual(result["html"], '<ul><li>Parent section</li><ul><li>First child</li><ul><li>Deep detail</li></ul><li>Second child</li></ul></ul><p class="ztext-empty-paragraph"><br/></p><ul><li>Last section</li></ul>')
+        self.assertEqual(result["html"], '<ul><li>Parent section</li><ul><li>First child</li><ul><li>Deep detail</li></ul><li>Second child</li></ul></ul><p class="ztext-empty-paragraph"><br/></p><ul><li>Last section</li></ul><p class="ztext-empty-paragraph"><br/></p>')
         self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)],
-                         [("item", 1), ("item", 2), ("item", 3), ("item", 2), ("gap", 0), ("item", 1)])
+                         [("item", 1), ("item", 2), ("item", 3), ("item", 2), ("gap", 0), ("item", 1), ("gap", 0)])
 
     def test_style_offsets_are_visible_text_offsets_not_html_parser_columns(self):
         wrapped = "<ul>\n<li>Earlier text</li>\n<li><strong>Bold</strong></li></ul>"
@@ -295,8 +295,17 @@ class LayoutTests(unittest.TestCase):
 
     def test_blank_structural_container_keeps_descendants_without_empty_bullet(self):
         result = self.prepare([(1, ""), (2, "A complete nested detail")])
-        self.assertEqual(self.blocks(result), [{"kind": "item", "depth": 2, "list": "ul", "text": "Acompletenesteddetail"}])
+        self.assertEqual(self.blocks(result), [{"kind": "item", "depth": 2, "list": "ul", "text": "Acompletenesteddetail"}, {"kind": "gap", "depth": 0}])
         self.assertNotIn("<li></li>", result["html"])
+
+    def test_exactly_one_final_blank_line_after_nested_content_and_editor_padding(self):
+        rows = [(1, "Parent section"), (2, "Last nested detail")]
+        plain = self.prepare(rows)
+        padded = self.prepare(rows + [(2, ""), (1, ""), (1, "")])
+        self.assertEqual(plain, padded)
+        self.assertEqual(self.blocks(plain)[-2]["text"], "Lastnesteddetail")
+        self.assertEqual(self.blocks(plain)[-1], {"kind": "gap", "depth": 0})
+        self.assertEqual(plain["html"].count('class="ztext-empty-paragraph"'), 1)
 
     def test_wrong_list_depth_and_wrong_blank_position_are_not_equivalent(self):
         one = '<ul><li>First</li></ul><p class="ztext-empty-paragraph"><br></p><ul><li>Second</li></ul>'
