@@ -5,11 +5,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { RemNoteMcp } from "./remnote-todo-cli.js";
 import {
+  type ArticleDraft,
   type ArticleNode,
   type ArticlePublisher,
   type ArticleState,
   adoptPublishedArticle,
+  type CloudDraft,
   runArticles,
+  type SeriesStats,
+  saveReviewDraft,
   scanArticles,
 } from "./remnote-zhihu.js";
 
@@ -21,6 +25,10 @@ const Config = z.object({
   cookieSnapshot: z.string().min(1),
   accountId: z.string().min(1),
   columnId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
+  seriesStartDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u)
+    .optional(),
 });
 type Config = z.infer<typeof Config>;
 
@@ -89,8 +97,29 @@ export class ZhihuPublisher implements ArticlePublisher {
   check(): Promise<{ id: string; name: string; urlToken: string; columnId: string }> {
     return this.call("check");
   }
-  publish(title: string, html: string): Promise<{ id: string }> {
-    return this.call("publish", { title, html });
+  publish(title: string, html: string, draft?: ArticleDraft): Promise<{ id: string }> {
+    return this.call("publish", {
+      title,
+      html,
+      ...(draft?.draftId ? { draftId: draft.draftId, expected: draft } : {}),
+    });
+  }
+  seriesStats(): Promise<SeriesStats> {
+    return this.call("series");
+  }
+  createDraft(): Promise<{ id: string }> {
+    return this.call("create-draft");
+  }
+  readDraft(articleId: string): Promise<CloudDraft> {
+    return this.call("read-draft", { articleId });
+  }
+  writeDraft(
+    articleId: string,
+    title: string,
+    html: string,
+    expected: CloudDraft,
+  ): Promise<CloudDraft> {
+    return this.call("write-draft", { articleId, title, html, expected });
   }
   verify(articleId: string): Promise<{
     id: string;
@@ -162,6 +191,21 @@ function readState(file: string): ArticleState {
     )
       throw new Error("invalid article receipt; state was preserved");
   }
+  if (state.drafts !== undefined) {
+    if (!Array.isArray(state.drafts)) throw new Error("invalid draft state");
+    for (const draft of state.drafts)
+      if (
+        !draft.source?.remId ||
+        !draft.source.fingerprint ||
+        !draft.title ||
+        !draft.html ||
+        !draft.text ||
+        !draft.format ||
+        !["creating", "review", "ready", "published"].includes(draft.status) ||
+        (draft.status !== "creating" && !/^\d+$/u.test(draft.draftId ?? ""))
+      )
+        throw new Error("invalid saved draft; state was preserved");
+  }
   return state;
 }
 
@@ -169,12 +213,12 @@ async function main(): Promise<void> {
   const [action, configFile, sourceRemId, articleId] = process.argv.slice(2);
   if (
     !action ||
-    !["check", "scan", "preview", "run", "adopt"].includes(action) ||
+    !["check", "scan", "preview", "run", "adopt", "draft", "approve-draft"].includes(action) ||
     !configFile ||
     !path.isAbsolute(configFile)
   )
     throw new Error(
-      "usage: remnote-zhihu-cli.js check|scan|preview|run|adopt <absolute-config.json> [sourceRemId articleId]",
+      "usage: remnote-zhihu-cli.js check|scan|preview|run|adopt|draft|approve-draft <absolute-config.json> [sourceRemId articleId]",
     );
   const config = Config.parse(JSON.parse(fs.readFileSync(configFile, "utf8")));
   for (const target of [config.python, config.cookieSnapshot])
@@ -182,12 +226,14 @@ async function main(): Promise<void> {
   if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(config.mcpUrl).hostname))
     throw new Error("RemNote endpoint must be loopback");
   const home = path.dirname(configFile);
-  const release = ["run", "adopt"].includes(action) ? lock(path.join(home, "run.lock")) : () => {};
+  const release = ["run", "adopt", "draft", "approve-draft"].includes(action)
+    ? lock(path.join(home, "run.lock"))
+    : () => {};
   const remnote = new RemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);
     const publisher = new ZhihuPublisher(config);
-    if (["run", "adopt"].includes(action)) {
+    if (["run", "adopt", "draft", "approve-draft"].includes(action)) {
       const stateFile = path.join(home, "state.json");
       const state = readState(stateFile);
       const shared = {
@@ -199,6 +245,44 @@ async function main(): Promise<void> {
         state,
         save: () => atomicJson(stateFile, state),
       };
+      if (action === "draft") {
+        if (!config.seriesStartDate)
+          throw new Error("series start date must be configured for preview");
+        const result = await saveReviewDraft({
+          ...shared,
+          seriesStartDate: config.seriesStartDate,
+          now: new Date(),
+          ...(sourceRemId ? { sourceRemId } : {}),
+        });
+        console.log(JSON.stringify(result));
+        return;
+      }
+      if (action === "approve-draft") {
+        const draft = state.drafts?.find(
+          (item) => item.source.remId === sourceRemId && item.status === "review",
+        );
+        if (!draft?.draftId) throw new Error("no review draft for this source");
+        const cloud = await publisher.readDraft(draft.draftId);
+        if (
+          cloud.state !== "draft" ||
+          cloud.title !== draft.title ||
+          cloud.text !== draft.text ||
+          cloud.format !== draft.format ||
+          cloud.authorId !== config.accountId
+        )
+          throw new Error("review draft changed; approval not applied");
+        draft.status = "ready";
+        shared.save();
+        console.log(
+          JSON.stringify({
+            status: "draft-approved",
+            draftId: draft.draftId,
+            published: 0,
+            moved: 0,
+          }),
+        );
+        return;
+      }
       if (action === "adopt") {
         if (!sourceRemId || !articleId)
           throw new Error("adopt requires exact source and published article IDs");
@@ -211,6 +295,7 @@ async function main(): Promise<void> {
         ...shared,
         now: new Date(),
         currentTime: () => new Date(),
+        ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
       });
       atomicJson(path.join(home, "last-run.json"), { at: new Date().toISOString(), ...result });
       console.log(JSON.stringify(result));

@@ -6,7 +6,9 @@ import {
   adoptPublishedArticle,
   publicationSlot,
   runArticles,
+  saveReviewDraft,
   scanArticles,
+  seriesTitle,
   snapshotArticle,
 } from "./remnote-zhihu.js";
 
@@ -358,5 +360,191 @@ describe("RemNote to Zhihu publishing", () => {
     expect(f.posts()).toBe(0);
     expect(f.state.receipts).toHaveLength(0);
     expect(f.nodes.get("one")?.parentRemId).toBe("group");
+  });
+  it("numbers published articles and calendar days separately in Shanghai", () => {
+    const state: ArticleState = { receipts: [] };
+    expect(
+      seriesTitle(
+        "Title",
+        new Date("2026-11-13T16:01:00Z"),
+        "2026-11-13",
+        { publishedCount: 1, maxOrdinal: 1 },
+        state,
+      ),
+    ).toBe("Title（第2 篇 | day 2）");
+    expect(
+      seriesTitle(
+        "Title（第7 篇 | day 5）",
+        new Date("2026-11-14T12:00:00Z"),
+        "2026-11-13",
+        { publishedCount: 4, maxOrdinal: 7 },
+        state,
+      ),
+    ).toBe("Title（第8 篇 | day 2）");
+    expect(() =>
+      seriesTitle(
+        "Title",
+        new Date("2026-11-14T12:00:00Z"),
+        "2026-02-30",
+        { publishedCount: 1, maxOrdinal: 1 },
+        state,
+      ),
+    ).toThrow("start date");
+    expect(() =>
+      seriesTitle(
+        "T".repeat(100),
+        new Date("2026-11-14T12:00:00Z"),
+        "2026-11-13",
+        { publishedCount: 1, maxOrdinal: 1 },
+        state,
+      ),
+    ).toThrow("exceeds");
+  });
+  it("uses the highest recorded ordinal even if an older article was removed from the column", async () => {
+    const f = fixture();
+    await runArticles(f.options);
+    (f.state.receipts[0] as NonNullable<(typeof f.state.receipts)[0]>).title =
+      "first（第9 篇 | day 1）";
+    expect(
+      seriesTitle(
+        "Next",
+        new Date("2026-11-14T10:00:00Z"),
+        "2026-11-13",
+        { publishedCount: 1, maxOrdinal: 1 },
+        f.state,
+      ),
+    ).toBe("Next（第10 篇 | day 2）");
+  });
+  it("stores a real draft for review without consuming a publication or moving its source", async () => {
+    const f = fixture();
+    let creates = 0;
+    let cloud = {
+      id: "777",
+      authorId: "account",
+      title: "",
+      text: "",
+      format: "[]",
+      state: "draft",
+      editorUrl: "https://zhuanlan.zhihu.com/p/777/edit",
+    };
+    f.publisher.seriesStats = async () => ({ publishedCount: 1, maxOrdinal: 1 });
+    f.publisher.createDraft = async () => {
+      creates++;
+      expect(JSON.parse(f.persisted()).drafts[0].status).toBe("creating");
+      return { id: "777" };
+    };
+    f.publisher.readDraft = async () => ({ ...cloud });
+    f.publisher.writeDraft = async (id, title, html) => {
+      expect(JSON.parse(f.persisted()).drafts[0].draftId).toBe("777");
+      cloud = { ...cloud, id, title, text: html.replace(/<[^>]+>/gu, "") };
+      return { ...cloud };
+    };
+    const result = await saveReviewDraft({
+      ...f.options,
+      seriesStartDate: "2026-11-13",
+      sourceRemId: "one",
+    });
+    expect(result).toMatchObject({
+      status: "draft-review",
+      title: "first（第2 篇 | day 2）",
+      published: 0,
+      moved: 0,
+    });
+    expect(f.state.receipts).toHaveLength(0);
+    expect(f.nodes.get("one")?.title).toBe("%first");
+    await saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" });
+    expect(creates).toBe(1);
+    // A held preview is skipped, so another eligible article can still be published.
+    await runArticles(f.options);
+    expect(f.state.receipts[0]?.source.remId).toBe("two");
+    expect(f.posts()).toBe(1);
+    cloud.title = "Author edit";
+    await expect(
+      saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" }),
+    ).rejects.toThrow("author edits");
+    expect(cloud.title).toBe("Author edit");
+  });
+  it("does not recreate a draft after an unknown creation result", async () => {
+    const f = fixture();
+    let attempts = 0;
+    f.publisher.seriesStats = async () => ({ publishedCount: 1, maxOrdinal: 1 });
+    f.publisher.createDraft = async () => {
+      attempts++;
+      throw new Error("connection lost");
+    };
+    f.publisher.readDraft = async () => {
+      throw new Error("must not read an unknown ID");
+    };
+    f.publisher.writeDraft = async () => {
+      throw new Error("must not write");
+    };
+    await expect(
+      saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" }),
+    ).rejects.toThrow("connection lost");
+    await expect(
+      saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" }),
+    ).rejects.toThrow("unknown draft");
+    expect(attempts).toBe(1);
+    expect(f.posts()).toBe(0);
+  });
+  it("publishes an approved draft using the saved cloud identity and final series title", async () => {
+    const f = fixture();
+    const source = await snapshotArticle(f.remnote, "one");
+    const prepared = await f.publisher.prepare(source.nodes);
+    const title = "first（第2 篇 | day 2）";
+    f.state.drafts = [{ source, ...prepared, title, status: "ready", draftId: "777" }];
+    f.publisher.seriesStats = async () => ({ publishedCount: 1, maxOrdinal: 1 });
+    f.publisher.readDraft = async () => ({
+      ...prepared,
+      title,
+      id: "777",
+      authorId: "account",
+      state: "draft",
+      editorUrl: "https://zhuanlan.zhihu.com/p/777/edit",
+    });
+    let calls = 0;
+    f.publisher.publish = async (actualTitle, _html, draft) => {
+      calls++;
+      expect(draft?.draftId).toBe("777");
+      expect(actualTitle).toBe(title);
+      return { id: "777" };
+    };
+    await runArticles({ ...f.options, seriesStartDate: "2026-11-13" });
+    expect(calls).toBe(1);
+    expect(f.state.receipts[0]?.articleId).toBe("777");
+    expect(f.state.drafts[0]?.status).toBe("published");
+    expect(f.nodes.get("one")?.parentRemId).toBe("published");
+  });
+  it("preserves cloud edits made after draft approval", async () => {
+    const f = fixture();
+    const source = await snapshotArticle(f.remnote, "one");
+    const prepared = await f.publisher.prepare(source.nodes);
+    f.state.drafts = [{ source, ...prepared, status: "ready", draftId: "777" }];
+    f.publisher.readDraft = async () => ({
+      ...prepared,
+      text: "Author changed body",
+      id: "777",
+      authorId: "account",
+      state: "draft",
+      editorUrl: "https://zhuanlan.zhihu.com/p/777/edit",
+    });
+    await expect(runArticles(f.options)).rejects.toThrow("cloud draft changed");
+    expect(f.posts()).toBe(0);
+  });
+  it("detects repeated content despite the publication series suffix", async () => {
+    const f = fixture();
+    await runArticles(f.options);
+    const receipt = f.state.receipts[0];
+    if (!receipt) throw new Error("missing fixture receipt");
+    receipt.title = "first（第1 篇 | day 1）";
+    const second = f.nodes.get("two");
+    const body = f.nodes.get("child2");
+    if (!second || !body) throw new Error("missing fixture nodes");
+    second.title = "%first";
+    body.title = "detail text";
+    await expect(
+      runArticles({ ...f.options, now: new Date("2026-11-14T09:30:00Z") }),
+    ).rejects.toThrow("duplicate article");
+    expect(f.posts()).toBe(1);
   });
 });
