@@ -13,6 +13,7 @@ from requests.cookies import create_cookie
 from zhihu_cli.client import ZhihuClient
 from zhihu_article_format import (
     ArticleLayout,
+    VisibleText,
     format_structure,
     normalize,
     prepare as prepare_layout,
@@ -186,31 +187,45 @@ def write_draft(client, article_id, title, html, account_id, expected):
 def publish_saved_draft(client, article_id, title, html, column_id, account_id, expected):
     check_column(client, column_id)
     write_draft(client, article_id, title, html, account_id, expected)
-    response = client._session.put(f"https://zhuanlan.zhihu.com/api/articles/{article_id}/publish", json={"column": column_id, "commentPermission": "anyone"}, timeout=15)
-    if response.status_code != 200:
-        raise ValueError("saved_draft_publish_failed")
-    return {"id": article_id_from_result(response.json())}
+    return publish_article_content(client, article_id, title, html, column_id)
+
+
+def publish_article_content(client, article_id, title, html, column_id, is_published=False):
+    check_column(client, column_id)
+    # Match the current first-party editor's article payload. The pinned
+    # client's text-only create_article branch still uses a retired endpoint.
+    visible = VisibleText()
+    visible.feed(html)
+    result = client._content_publish({
+        "action": "article",
+        "data": {
+            "extra_info": {"publisher": "pc"},
+            "draft": {"disabled": 1, "id": article_id, "isPublished": is_published},
+            "column": {"column": [column_id]},
+            "commentsPermission": {"comment_permission": "anyone"},
+            "creationStatement": {"disclaimer_type": "none", "disclaimer_status": "close"},
+            "contentsTables": {"table_of_contents_enabled": False},
+            "commercialReportInfo": {"isReport": 0},
+            "appreciate": {"can_reward": False, "tagline": ""},
+            "hybrid": {"html": html, "textLength": len("".join(visible.parts).encode("utf-16-le")) // 2},
+            "title": {"title": title},
+        },
+    })
+    published = result.get("publish", {})
+    if published.get("id") and str(published["id"]) != article_id:
+        raise ValueError("published_draft_id_changed")
+    # The original ID is durable; the caller must verify published state, full
+    # content and accepted column membership before treating this as success.
+    return {"id": article_id}
 
 
 def publish_in_column(client, title, html, column_id):
     check_column(client, column_id)
-    original_request = client._session.request
-
-    def request_with_column(method, url, **kwargs):
-        if method.upper() == "PUT" and re.fullmatch(r"https://zhuanlan\.zhihu\.com/api/articles/\d+/publish", url):
-            payload = dict(kwargs.get("json", {}))
-            if payload.get("column") not in (None, column_id):
-                raise ValueError("unexpected_publish_column")
-            payload["column"] = column_id
-            kwargs["json"] = payload
-        return original_request(method, url, **kwargs)
-
-    client._session.request = request_with_column
-    try:
-        # Reuse the pinned client's draft/update/publish flow, changing only the column field.
-        return client.create_article(title, content=html)
-    finally:
-        client._session.request = original_request
+    created = create_draft(client)
+    before = read_draft(client, created["id"])
+    if before["state"] != "draft" or before["title"] or before["text"]:
+        raise ValueError("new_publish_draft_not_empty")
+    return publish_saved_draft(client, created["id"], title, html, column_id, before["authorId"], before)
 
 
 def main(request):

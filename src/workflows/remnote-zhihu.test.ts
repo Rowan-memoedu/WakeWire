@@ -455,7 +455,10 @@ describe("RemNote to Zhihu publishing", () => {
     await saveReviewDraft({ ...f.options, seriesStartDate: "2026-11-13", sourceRemId: "one" });
     expect(creates).toBe(1);
     // A held preview is skipped, so another eligible article can still be published.
+    const draftCreator = f.publisher.createDraft;
+    delete f.publisher.createDraft; // This fixture's creator is scoped to the review draft.
     await runArticles(f.options);
+    f.publisher.createDraft = draftCreator;
     expect(f.state.receipts[0]?.source.remId).toBe("two");
     expect(f.posts()).toBe(1);
     cloud.title = "Author edit";
@@ -530,6 +533,57 @@ describe("RemNote to Zhihu publishing", () => {
     });
     await expect(runArticles(f.options)).rejects.toThrow("cloud draft changed");
     expect(f.posts()).toBe(0);
+  });
+  it("persists a newly provisioned cloud ID and recovers publication by readback without replay", async () => {
+    const f = fixture();
+    let creates = 0;
+    let attempts = 0;
+    f.publisher.createDraft = async () => {
+      creates++;
+      return { id: "777" };
+    };
+    f.publisher.readDraft = async () => ({
+      id: "777",
+      authorId: "account",
+      title: "",
+      text: "",
+      format: "[]",
+      state: "draft",
+      editorUrl: "https://zhuanlan.zhihu.com/p/777/edit",
+    });
+    f.publisher.publish = async (_title, _html, draft) => {
+      attempts++;
+      expect(draft?.draftId).toBe("777");
+      expect(draft?.cloudBefore?.title).toBe("");
+      expect(JSON.parse(f.persisted()).receipts[0].articleId).toBe("777");
+      throw new Error("response lost after publish");
+    };
+    await expect(runArticles(f.options)).rejects.toThrow("response lost");
+    expect(f.state.receipts[0]?.stage).toBe("submitting");
+    const recovered = await runArticles(f.options);
+    expect(recovered.archived).toBe(1);
+    expect(f.state.receipts[0]?.stage).toBe("archived");
+    expect(attempts).toBe(1);
+    expect(creates).toBe(1);
+  });
+  it("does not replay a known draft when public readback still says unpublished", async () => {
+    const f = fixture();
+    const source = await snapshotArticle(f.remnote, "one");
+    const prepared = await f.publisher.prepare(source.nodes);
+    f.state.receipts.push({
+      source,
+      ...prepared,
+      stage: "submitting",
+      articleId: "777",
+      columnId: "col",
+      slot: "earlier",
+    });
+    f.publisher.verify = async () => {
+      throw new Error("article_not_published");
+    };
+    await expect(runArticles(f.options)).rejects.toThrow("article_not_published");
+    expect(f.posts()).toBe(0);
+    expect(f.state.receipts[0]?.stage).toBe("submitting");
   });
   it("detects repeated content despite the publication series suffix", async () => {
     const f = fixture();

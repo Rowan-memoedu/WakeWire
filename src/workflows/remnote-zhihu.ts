@@ -417,9 +417,9 @@ export async function runArticles(options: {
   let archived = 0;
   for (const receipt of state.receipts) {
     if (receipt.stage === "archived") continue;
-    if (receipt.stage === "submitting")
+    if (receipt.stage === "submitting" && !receipt.articleId)
       throw new Error("unknown publication result; automatic replay blocked");
-    if (receipt.stage === "published") {
+    if (receipt.stage === "published" || receipt.stage === "submitting") {
       const result = await publisher.verify(receipt.articleId as string);
       if (
         result.id !== receipt.articleId ||
@@ -537,12 +537,38 @@ export async function runArticles(options: {
     ...prepared,
     columnId: options.columnId,
     stage: "submitting",
+    ...(savedDraft?.draftId ? { articleId: savedDraft.draftId } : {}),
   };
   state.receipts.push(receipt);
   save(); // Durable fence BEFORE any mutation; timeout/crash cannot cause another POST.
-  const result = await publisher.publish(prepared.title, prepared.html, savedDraft);
+  let deliveryDraft = savedDraft;
+  if (!deliveryDraft && publisher.createDraft && publisher.readDraft) {
+    const created = await publisher.createDraft();
+    if (!/^\d+$/u.test(created.id)) throw new Error("created publication draft ID missing");
+    receipt.articleId = created.id;
+    save(); // Persist the cloud identity before any body write or publication.
+    const cloud = await publisher.readDraft(created.id);
+    if (
+      cloud.id !== created.id ||
+      cloud.authorId !== accountId ||
+      cloud.state !== "draft" ||
+      cloud.title ||
+      cloud.text
+    )
+      throw new Error("new publication draft identity or content changed");
+    deliveryDraft = {
+      source,
+      ...prepared,
+      status: "ready",
+      draftId: created.id,
+      cloudBefore: cloud,
+    };
+  }
+  const result = await publisher.publish(prepared.title, prepared.html, deliveryDraft);
   if (!/^\d+$/u.test(result.id))
     throw new Error("publication ID missing; automatic replay blocked");
+  if (receipt.articleId && result.id !== receipt.articleId)
+    throw new Error("publication draft identity changed; automatic replay blocked");
   receipt.articleId = result.id;
   receipt.stage = "published";
   save();

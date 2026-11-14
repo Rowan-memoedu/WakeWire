@@ -114,6 +114,7 @@ class AdapterTests(unittest.TestCase):
     def test_pinned_upstream_article_client_full_sequence_without_network(self):
         client = ZhihuClient({})
         calls = []
+        cloud = {"id": "789", "state": "draft", "author": {"id": "me"}, "title": "", "content": ""}
 
         def respond(method, url, **kwargs):
             calls.append((method.upper(), url))
@@ -123,12 +124,20 @@ class AdapterTests(unittest.TestCase):
                 data = {"id": "synthetic-column", "url_token": "synthetic-column", "can_manage": True}
             elif url.endswith("/articles/drafts"):
                 data = {"id": "789"}
+            elif url.endswith("/articles/789"):
+                data = dict(cloud)
             elif url.endswith("/draft"):
                 self.assertEqual(kwargs["json"], {"title": "A title", "content": "<p>Independent body</p>"})
-                data = {}
-            elif url.endswith("/publish"):
-                self.assertEqual(kwargs["json"]["column"], "synthetic-column")
-                data = {"id": "789", "state": "published"}
+                cloud.update(kwargs["json"])
+                data = dict(cloud)
+            elif url.endswith("/content/publish"):
+                self.assertEqual(method.upper(), "POST")
+                self.assertEqual(kwargs["json"]["action"], "article")
+                payload = kwargs["json"]["data"]
+                self.assertEqual(payload["column"], {"column": ["synthetic-column"]})
+                self.assertEqual(payload["draft"], {"disabled": 1, "id": "789", "isPublished": False})
+                self.assertEqual(payload["hybrid"]["html"], "<p>Independent body</p>")
+                data = {"code": 0, "data": {"result": json.dumps({"publish": {"id": "789"}})}}
             else:
                 self.fail("unexpected upstream request")
             result = MagicMock()
@@ -139,7 +148,9 @@ class AdapterTests(unittest.TestCase):
         with patch.object(adapter, "load_client", return_value=client), patch.object(client._session, "request", side_effect=respond):
             result = adapter.main({"action": "publish", "snapshotPath": "synthetic", "expectedAccountId": "me", "title": "A title", "html": "<p>Independent body</p>", "columnId": "synthetic-column"})
         self.assertEqual(result, {"id": "789"})
-        self.assertEqual([method for method, _ in calls], ["GET", "GET", "POST", "PATCH", "PUT"])
+        self.assertEqual([method for method, _ in calls if method != "GET"], ["POST", "PATCH", "POST"])
+        self.assertEqual(sum(url.endswith('/articles/drafts') for _, url in calls), 1)
+        self.assertNotIn("PUT", [method for method, _ in calls])
         self.assertTrue(all("/pin" not in url for _, url in calls))
 
     def test_only_accepted_columns_count_as_membership(self):
@@ -214,7 +225,7 @@ class AdapterTests(unittest.TestCase):
         calls = []
 
         def request(method, url, **kwargs):
-            calls.append(method.upper())
+            calls.append((method.upper(), url))
             response = MagicMock()
             response.status_code = 200
             if "/columns/" in url:
@@ -223,14 +234,15 @@ class AdapterTests(unittest.TestCase):
                 self.assertTrue(url.endswith("/666/draft"))
                 cloud.update(kwargs["json"])
                 data = dict(cloud)
-            elif method.upper() == "PUT":
-                self.assertTrue(url.endswith("/666/publish"))
-                self.assertEqual(kwargs["json"]["column"], "column")
-                data = {"id": "666", "state": "published"}
+            elif method.upper() == "POST":
+                self.assertTrue(url.endswith("/api/v4/content/publish"))
+                self.assertEqual(kwargs["json"]["data"]["column"], {"column": ["column"]})
+                self.assertEqual(kwargs["json"]["data"]["draft"]["id"], "666")
+                data = {"code": 0, "data": {"result": json.dumps({"publish": {"id": "666"}})}}
             elif method.upper() == "GET":
                 data = dict(cloud)
             else:
-                self.fail("must reuse approved draft without POST")
+                self.fail("must reuse approved draft without creating a second draft")
             response.json.return_value = data
             return response
 
@@ -238,8 +250,9 @@ class AdapterTests(unittest.TestCase):
             before = adapter.read_draft(client, "666")
             result = adapter.publish_saved_draft(client, "666", "Final title", "<ul><li>Complete new body</li></ul>", "column", "me", before)
         self.assertEqual(result, {"id": "666"})
-        self.assertNotIn("POST", calls)
-        self.assertEqual(calls.count("PUT"), 1)
+        self.assertFalse(any(url.endswith('/articles/drafts') for _, url in calls))
+        self.assertEqual(sum(method == "POST" for method, _ in calls), 1)
+        self.assertFalse(any(method == "PUT" for method, _ in calls))
 
 
 class LayoutTests(unittest.TestCase):
@@ -251,22 +264,22 @@ class LayoutTests(unittest.TestCase):
 
     def test_empty_editor_edges_are_omitted_and_inner_blank_is_a_paragraph(self):
         result = self.prepare([(1, ""), (1, "First section"), (1, ""), (1, "Second section"), (1, ""), (1, " ")])
-        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "item", "gap"])
-        self.assertEqual(result["html"].count('class="ztext-empty-paragraph"'), 2)
+        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "item"])
+        self.assertEqual(result["html"].count('class="ztext-empty-paragraph"'), 1)
         self.assertNotIn("<li></li>", result["html"])
 
     def test_consecutive_authored_blank_nodes_remain_separate(self):
         result = self.prepare([(1, "First section"), (1, ""), (1, ""), (1, "Next section")])
-        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "gap", "item", "gap"])
+        self.assertEqual([block["kind"] for block in self.blocks(result)], ["item", "gap", "gap", "item"])
 
     def test_nested_separator_keeps_the_children_at_the_original_depth(self):
         result = self.prepare([(1, "Parent item"), (2, "First detail"), (2, ""), (2, "Second detail"), (1, "Sibling item")])
-        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)], [("item", 1), ("item", 2), ("gap", 1), ("item", 2), ("item", 1), ("gap", 0)])
+        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)], [("item", 1), ("item", 2), ("gap", 1), ("item", 2), ("item", 1)])
 
     def test_node_internal_single_and_double_newlines_are_visible_breaks(self):
         result = self.prepare([(1, "First line\nSecond line\n\nThird line")])
         self.assertEqual(self.blocks(result)[0]["text"], "Firstline\nSecondline\n\nThirdline")
-        self.assertEqual(len(re.findall(r"<br\s*/?>", result["html"])), 4)
+        self.assertEqual(len(re.findall(r"<br\s*/?>", result["html"])), 3)
 
     def test_readback_rejects_missing_newline_even_when_all_words_match(self):
         first = "<ul><li>First<br>Second text</li></ul>"
@@ -284,9 +297,9 @@ class LayoutTests(unittest.TestCase):
         # the real editor. An outline return must close only the child <ul>.
         result = self.prepare([(1, "Parent section"), (2, "First child"), (3, "Deep detail"),
                                (2, "Second child"), (1, ""), (1, "Last section")])
-        self.assertEqual(result["html"], '<ul><li>Parent section</li><ul><li>First child</li><ul><li>Deep detail</li></ul><li>Second child</li></ul></ul><p class="ztext-empty-paragraph"><br/></p><ul><li>Last section</li></ul><p class="ztext-empty-paragraph"><br/></p>')
+        self.assertEqual(result["html"], '<ul><li>Parent section</li><ul><li>First child</li><ul><li>Deep detail</li></ul><li>Second child</li></ul></ul><p class="ztext-empty-paragraph"><br/></p><ul><li>Last section</li></ul>')
         self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)],
-                         [("item", 1), ("item", 2), ("item", 3), ("item", 2), ("gap", 0), ("item", 1), ("gap", 0)])
+                         [("item", 1), ("item", 2), ("item", 3), ("item", 2), ("gap", 0), ("item", 1)])
 
     def test_style_offsets_are_visible_text_offsets_not_html_parser_columns(self):
         wrapped = "<ul>\n<li>Earlier text</li>\n<li><strong>Bold</strong></li></ul>"
@@ -295,17 +308,18 @@ class LayoutTests(unittest.TestCase):
 
     def test_blank_structural_container_keeps_descendants_without_empty_bullet(self):
         result = self.prepare([(1, ""), (2, "A complete nested detail")])
-        self.assertEqual(self.blocks(result), [{"kind": "item", "depth": 2, "list": "ul", "text": "Acompletenesteddetail"}, {"kind": "gap", "depth": 0}])
+        self.assertEqual(self.blocks(result), [{"kind": "item", "depth": 2, "list": "ul", "text": "Acompletenesteddetail"}])
         self.assertNotIn("<li></li>", result["html"])
 
-    def test_exactly_one_final_blank_line_after_nested_content_and_editor_padding(self):
+    def test_trailing_editor_padding_does_not_add_blank_lines(self):
         rows = [(1, "Parent section"), (2, "Last nested detail")]
         plain = self.prepare(rows)
         padded = self.prepare(rows + [(2, ""), (1, ""), (1, "")])
         self.assertEqual(plain, padded)
-        self.assertEqual(self.blocks(plain)[-2]["text"], "Lastnesteddetail")
-        self.assertEqual(self.blocks(plain)[-1], {"kind": "gap", "depth": 0})
-        self.assertEqual(plain["html"].count('class="ztext-empty-paragraph"'), 1)
+        self.assertEqual(self.blocks(plain)[-1]["text"], "Lastnesteddetail")
+        self.assertFalse(any(block["kind"] == "gap" for block in self.blocks(plain)))
+        self.assertNotIn('&nbsp;', plain["html"])
+        self.assertEqual(adapter.normalize(plain["html"]), 'ParentsectionLastnesteddetail')
 
     def test_wrong_list_depth_and_wrong_blank_position_are_not_equivalent(self):
         one = '<ul><li>First</li></ul><p class="ztext-empty-paragraph"><br></p><ul><li>Second</li></ul>'
