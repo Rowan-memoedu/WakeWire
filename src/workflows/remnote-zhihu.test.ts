@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { RemNode, RemNoteReader } from "./remnote-todo.js";
 import {
   type ArticlePublisher,
+  type ArticleReader,
+  type ArticleRem,
   type ArticleState,
   adoptPublishedArticle,
   publicationSlot,
@@ -105,7 +107,195 @@ function fixture() {
   };
 }
 
+function taggedFixture() {
+  const f = fixture();
+  const nodes = f.nodes as Map<string, ArticleRem>;
+  const remnote: ArticleReader = f.remnote;
+  (nodes.get("one") as ArticleRem).title = "first";
+  (nodes.get("two") as ArticleRem).title = "second";
+  nodes.set("elsewhere", { remId: "elsewhere", title: "Other Document", remType: "document" });
+  nodes.set("external", {
+    remId: "external",
+    title: "%External title",
+    parentRemId: "elsewhere",
+    tags: [
+      { tagRemId: "doc", name: "Article Source" },
+      { tagRemId: "private-tag", name: "Keep" },
+    ],
+  });
+  nodes.set("external-body", {
+    remId: "external-body",
+    title: "Complete external article body",
+    parentRemId: "external",
+  });
+  const tagCalls: Array<{ id: string; add: string[]; remove: string[] }> = [];
+  remnote.tagged = async (tagRemId) => ({
+    results: [...nodes.values()]
+      .filter((node) => node.tags?.some((tag) => tag.tagRemId === tagRemId))
+      .map((node) => structuredClone(node)),
+    hasMore: false,
+  });
+  remnote.updateTags = async (id, add, remove) => {
+    tagCalls.push({ id, add, remove });
+    const node = nodes.get(id) as ArticleRem;
+    node.tags = (node.tags ?? []).filter((tag) => !remove.includes(tag.tagRemId));
+    for (const tagRemId of add)
+      if (!node.tags.some((tag) => tag.tagRemId === tagRemId))
+        node.tags.push({ tagRemId, name: tagRemId });
+  };
+  return {
+    ...f,
+    nodes,
+    remnote,
+    tagCalls,
+    options: { ...f.options, remnote, publishedTagRemId: "published" },
+  };
+}
+
 describe("RemNote to Zhihu publishing", () => {
+  it("publishes external tagged content in place, switches only workflow tags and clears the marker", async () => {
+    const f = taggedFixture();
+    const source = await snapshotArticle(f.remnote, "external");
+    const result = await runArticles(f.options);
+    expect(result).toMatchObject({ published: 1, archived: 1 });
+    expect(f.posts()).toBe(1);
+    expect(f.nodes.get("external")).toMatchObject({
+      title: "External title",
+      parentRemId: "elsewhere",
+    });
+    expect(
+      f.nodes
+        .get("external")
+        ?.tags?.map((tag) => tag.tagRemId)
+        .sort(),
+    ).toEqual(["private-tag", "published"]);
+    expect((await snapshotArticle(f.remnote, "external")).fingerprint).toBe(source.fingerprint);
+    expect(f.state.receipts[0]?.source.tagTrigger).toEqual({
+      triggerTagRemId: "doc",
+      publishedTagRemId: "published",
+    });
+    expect(f.tagCalls).toEqual([
+      { id: "external", add: ["published"], remove: [] },
+      { id: "external", add: [], remove: ["doc"] },
+    ]);
+  });
+  it("requires both the exact source tag and a single percent marker", async () => {
+    const f = taggedFixture();
+    const root = f.nodes.get("external") as ArticleRem;
+    root.title = "External title";
+    expect((await scanArticles(f.remnote, "doc", "published")).sources).toHaveLength(0);
+    root.title = "%External title";
+    root.tags = [{ tagRemId: "same-name-but-other-id", name: "Article Source" }];
+    expect((await scanArticles(f.remnote, "doc", "published")).sources).toHaveLength(0);
+    root.tags = [
+      { tagRemId: "doc", name: "Article Source" },
+      { tagRemId: "published", name: "已发布" },
+    ];
+    expect((await scanArticles(f.remnote, "doc", "published")).sources).toHaveLength(0);
+    root.tags = [{ tagRemId: "doc", name: "Article Source" }];
+    root.title = "%%Paused";
+    expect((await scanArticles(f.remnote, "doc", "published")).sources).toHaveLength(0);
+  });
+  it("ignores an unmarked query portal while still blocking a marked portal", async () => {
+    const f = taggedFixture();
+    f.nodes.set("query", {
+      remId: "query",
+      title: "query:Tagged content",
+      remType: "portal",
+      parentRemId: "doc",
+    });
+    expect((await scanArticles(f.remnote, "doc", "published")).blocked).toEqual([]);
+    (f.nodes.get("query") as ArticleRem).title = "%query:Tagged content";
+    expect((await scanArticles(f.remnote, "doc", "published")).blocked).toEqual(["query"]);
+  });
+  it("deduplicates document descendants and tag hits, retaining the original document archive mode", async () => {
+    const f = taggedFixture();
+    const local = f.nodes.get("one") as ArticleRem;
+    local.title = "%first";
+    local.tags = [{ tagRemId: "doc", name: "Article Source" }];
+    const scan = await scanArticles(f.remnote, "doc", "published");
+    expect(scan.sources.map((source) => source.remId)).toEqual(["one", "external"]);
+    expect(scan.sources[0]?.tagTrigger).toBeUndefined();
+    await runArticles(f.options);
+    expect(f.nodes.get("one")?.parentRemId).toBe("published");
+    expect(f.tagCalls).toHaveLength(0);
+  });
+  it("supports a tagged source at the knowledge-base root without moving it", async () => {
+    const f = taggedFixture();
+    delete (f.nodes.get("external") as ArticleRem).parentRemId;
+    await runArticles(f.options);
+    expect(f.nodes.get("external")?.parentRemId).toBeUndefined();
+    expect(f.state.receipts[0]?.source.parentRemId).toBe("");
+    expect(f.state.receipts[0]?.stage).toBe("archived");
+  });
+  it("rejects nested marked tag sources rather than publishing either subtree twice", async () => {
+    const f = taggedFixture();
+    const child = f.nodes.get("external-body") as ArticleRem;
+    child.title = "%Nested title";
+    child.tags = [{ tagRemId: "doc", name: "Article Source" }];
+    const scan = await scanArticles(f.remnote, "doc", "published");
+    expect(scan.sources).toHaveLength(0);
+    expect(scan.blocked.sort()).toEqual(["external", "external-body"]);
+  });
+  it("rejects truncated tag search and repeated pagination cursors", async () => {
+    const f = taggedFixture();
+    f.remnote.tagged = async () => ({ results: [], truncated: true });
+    await expect(scanArticles(f.remnote, "doc", "published")).rejects.toThrow("truncated");
+    f.remnote.tagged = async () => ({ results: [], hasMore: true, nextCursor: "again" });
+    await expect(scanArticles(f.remnote, "doc", "published")).rejects.toThrow("cursor");
+    expect(f.posts()).toBe(0);
+  });
+  it("rechecks the trigger tag immediately before publication", async () => {
+    const f = taggedFixture();
+    f.publisher.check = async () => {
+      (f.nodes.get("external") as ArticleRem).tags = [];
+      return { id: "account", name: "author", urlToken: "author", columnId: "col" };
+    };
+    await expect(runArticles(f.options)).rejects.toThrow("trigger changed");
+    expect(f.posts()).toBe(0);
+    expect(f.state.receipts).toHaveLength(0);
+  });
+  it("keeps trigger tags and the marker when public verification fails", async () => {
+    const f = taggedFixture();
+    const verify = f.publisher.verify;
+    f.publisher.verify = async (id) => ({ ...(await verify(id)), columnIds: [] });
+    await expect(runArticles(f.options)).rejects.toThrow("readback mismatch");
+    expect(f.tagCalls).toHaveLength(0);
+    expect(f.nodes.get("external")?.title).toBe("%External title");
+    expect(f.nodes.get("external")?.tags?.some((tag) => tag.tagRemId === "doc")).toBe(true);
+  });
+  it("detects an adapter that replaces unrelated tags instead of adding the completion tag", async () => {
+    const f = taggedFixture();
+    f.remnote.updateTags = async (id, add) => {
+      (f.nodes.get(id) as ArticleRem).tags = add.map((tagRemId) => ({ tagRemId, name: tagRemId }));
+    };
+    await expect(runArticles(f.options)).rejects.toThrow("tag readback mismatch");
+    expect(f.state.receipts[0]?.stage).toBe("verified");
+    expect(f.nodes.get("external")?.title).toBe("%External title");
+  });
+  it("recovers an interrupted tag switch without publishing or moving the original again", async () => {
+    const f = taggedFixture();
+    const update = f.remnote.updateTags;
+    if (!update) throw new Error("fixture tag adapter missing");
+    let fail = true;
+    f.remnote.updateTags = async (id, add, remove) => {
+      await update(id, add, remove);
+      if (fail && remove.includes("doc")) {
+        fail = false;
+        throw new Error("lost reply after tag removal");
+      }
+    };
+    await expect(runArticles(f.options)).rejects.toThrow("lost reply");
+    expect(f.state.receipts[0]?.stage).toBe("verified");
+    expect(f.nodes.get("external")?.title).toBe("%External title");
+    await runArticles(f.options);
+    expect(f.posts()).toBe(1);
+    expect(f.nodes.get("external")).toMatchObject({
+      title: "External title",
+      parentRemId: "elsewhere",
+    });
+    expect(f.state.receipts[0]?.stage).toBe("archived");
+  });
   it("uses Shanghai windows and never catches up missed windows", () => {
     expect(publicationSlot(new Date("2026-11-14T03:29:59Z"))).toBeUndefined();
     expect(publicationSlot(new Date("2026-11-14T03:30:00Z"))).toBe("2026-11-14T11:30+08:00");

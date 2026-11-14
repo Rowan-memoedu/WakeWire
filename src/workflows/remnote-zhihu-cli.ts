@@ -8,6 +8,8 @@ import {
   type ArticleDraft,
   type ArticleNode,
   type ArticlePublisher,
+  type ArticleReader,
+  type ArticleRem,
   type ArticleState,
   adoptPublishedArticle,
   type CloudDraft,
@@ -29,8 +31,64 @@ const Config = z.object({
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/u)
     .optional(),
+  publishedTagRemId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/u)
+    .optional(),
 });
 type Config = z.infer<typeof Config>;
+
+const ArticleRemSchema = z.object({
+  remId: z.string().min(1),
+  title: z.string(),
+  headline: z.string().optional(),
+  parentRemId: z.string().optional(),
+  inlineRefs: z.array(z.object({ targetRemId: z.string(), text: z.string() })).optional(),
+  media: z.array(z.unknown()).optional(),
+  remType: z.string().optional(),
+  tags: z.array(z.object({ tagRemId: z.string().min(1), name: z.string() })).optional(),
+});
+
+/** Article-only tag extension; the existing command adapter remains unchanged. */
+export class ArticleRemNoteMcp extends RemNoteMcp implements ArticleReader {
+  override async read(remId: string): Promise<ArticleRem> {
+    return ArticleRemSchema.parse(
+      await this.call("remnote_read_note", {
+        remId,
+        depth: 0,
+        contentMode: "none",
+        view: "full",
+        includeMediaMetadata: true,
+      }),
+    );
+  }
+  async tagged(tagRemId: string, cursor?: string) {
+    return z
+      .object({
+        results: z.array(ArticleRemSchema),
+        hasMore: z.boolean().optional(),
+        nextCursor: z.string().optional(),
+        truncated: z.boolean().optional(),
+      })
+      .parse(
+        await this.call("remnote_search_by_tag", {
+          tagRemId,
+          resultMode: "tagged",
+          contentMode: "none",
+          limit: 150,
+          view: "full",
+          ...(cursor ? { cursor } : {}),
+        }),
+      );
+  }
+  async updateTags(
+    remId: string,
+    addTagRemIds: string[],
+    removeTagRemIds: string[],
+  ): Promise<void> {
+    await this.call("remnote_update_tags", { remId, addTagRemIds, removeTagRemIds });
+  }
+}
 
 export class ZhihuPublisher implements ArticlePublisher {
   constructor(private readonly config: Config) {}
@@ -177,7 +235,7 @@ function readState(file: string): ArticleState {
   for (const r of state.receipts) {
     if (
       !r.source?.remId ||
-      !r.source.parentRemId ||
+      (!r.source.parentRemId && !r.source.tagTrigger) ||
       !r.source.fingerprint ||
       !r.source.nodes?.length ||
       !r.html ||
@@ -191,6 +249,15 @@ function readState(file: string): ArticleState {
     )
       throw new Error("invalid article receipt; state was preserved");
   }
+  const route = z.object({
+    triggerTagRemId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
+    publishedTagRemId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
+  });
+  for (const source of [
+    ...state.receipts.map((item) => item.source),
+    ...(state.drafts ?? []).map((item) => item.source),
+  ])
+    if (source?.tagTrigger) route.parse(source.tagTrigger);
   if (state.drafts !== undefined) {
     if (!Array.isArray(state.drafts)) throw new Error("invalid draft state");
     for (const draft of state.drafts)
@@ -229,7 +296,7 @@ async function main(): Promise<void> {
   const release = ["run", "adopt", "draft", "approve-draft"].includes(action)
     ? lock(path.join(home, "run.lock"))
     : () => {};
-  const remnote = new RemNoteMcp();
+  const remnote = new ArticleRemNoteMcp();
   try {
     await remnote.connect(config.mcpUrl);
     const publisher = new ZhihuPublisher(config);
@@ -242,6 +309,7 @@ async function main(): Promise<void> {
         documentRemId: config.documentRemId,
         accountId: config.accountId,
         columnId: config.columnId,
+        ...(config.publishedTagRemId ? { publishedTagRemId: config.publishedTagRemId } : {}),
         state,
         save: () => atomicJson(stateFile, state),
       };
@@ -297,15 +365,20 @@ async function main(): Promise<void> {
         currentTime: () => new Date(),
         ...(config.seriesStartDate ? { seriesStartDate: config.seriesStartDate } : {}),
       });
-      atomicJson(path.join(home, "last-run.json"), { at: new Date().toISOString(), ...result });
+      const finishedAt = new Date().toISOString();
+      atomicJson(path.join(home, "last-run.json"), { at: finishedAt, finishedAt, ...result });
       console.log(JSON.stringify(result));
       return;
     }
-    const scan = await scanArticles(remnote, config.documentRemId);
+    const scan = await scanArticles(remnote, config.documentRemId, config.publishedTagRemId);
     const result: Record<string, unknown> = {
       ready: true,
       scanned: scan.nodeCount,
       pending: scan.sources.length,
+      externalPending: scan.sources.filter((source) => source.tagTrigger).length,
+      ...(config.publishedTagRemId
+        ? { tagged: scan.taggedCount, taggedAwaitingMarker: scan.taggedAwaitingMarker }
+        : {}),
       blocked: scan.blocked.length,
       published: 0,
       moved: 0,
@@ -336,6 +409,21 @@ async function main(): Promise<void> {
       result.nodes = source.nodes.length;
     }
     console.log(JSON.stringify(result));
+  } catch (error) {
+    if (action === "run") {
+      const finishedAt = new Date().toISOString();
+      const message = error instanceof Error ? error.message : "";
+      const reason = /^remnote_|^RemNote bridge/u.test(message)
+        ? "remnote-unavailable"
+        : "workflow-error";
+      atomicJson(path.join(home, "last-run.json"), {
+        at: finishedAt,
+        finishedAt,
+        status: "error",
+        reason,
+      });
+    }
+    throw error;
   } finally {
     await remnote.close();
     release();

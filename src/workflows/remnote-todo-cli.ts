@@ -115,7 +115,7 @@ export class RemNoteMcp implements RemNoteReader {
   async close(): Promise<void> {
     await this.client.close();
   }
-  private async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+  protected async call(name: string, args: Record<string, unknown>): Promise<unknown> {
     try {
       return unwrap(
         await this.client.callTool({ name, arguments: args }, undefined, { timeout: 60_000 }),
