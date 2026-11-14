@@ -37,7 +37,8 @@ python -m venv <runtime-directory>
   "python": "<absolute-runtime-python>",
   "cookieSnapshot": "<existing-local-chrome-cookie-snapshot>",
   "accountId": "<verified-zhihu-account-id>",
-  "columnId": "<verified-managed-column-token>"
+  "columnId": "<verified-managed-column-token>",
+  "seriesStartDate": "<YYYY-MM-DD-in-Shanghai>"
 }
 ```
 
@@ -45,12 +46,20 @@ python -m venv <runtime-directory>
 node dist/workflows/remnote-zhihu-cli.js check <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js scan <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js preview <absolute-config.json>
+node dist/workflows/remnote-zhihu-cli.js draft <absolute-config.json> <source-rem-id>
+node dist/workflows/remnote-zhihu-cli.js approve-draft <absolute-config.json> <source-rem-id>
 node dist/workflows/remnote-zhihu-cli.js run <absolute-config.json>
 node dist/workflows/remnote-zhihu-cli.js adopt <absolute-config.json> <source-rem-id> <published-article-id>
 pwsh -NoLogo -NoProfile -File scripts/install-remnote-zhihu-task.ps1 -Config <absolute-config.json>
 ```
 
-`check` 为只读扫描及登录核验；`scan` 只读计数；`preview` 将第一篇待发布内容转换为本地 HTML，不触碰知乎草稿或修改 RemNote；只有 `run` 会在指定窗口新建发布，窗口外仅补做已有记录的恢复。`adopt` 用于用户明确指出已手动发布的文章：核对完整正文、可见布局、作者与专栏后，登记实际公开标题和 URL，将原子树归档；它不会新建或修改任何知乎文章。标题可保留作者手动添加的后缀，但工作流不据此自动生成序号或日期。已有回执冲突或对照不符时停止，不靠移除 `%` 隐藏问题。配置目录保存 `state.json`、`last-run.json`、`preview.html` 和 `preview.json`。运行使用进程排他锁，死进程残留锁可恢复，活进程持锁时拒绝并行。
+`check` 为只读扫描及登录核验；`scan` 只读计数；`preview` 将第一篇待发布内容转换为本地 HTML，不触碰知乎草稿或修改 RemNote。`draft` 使用真实知乎登录态创建并保存云端草稿，回读标题、全文与布局，返回真实编辑器链接；重复运行更新同一草稿，不另建副本。草稿结果不明时保留记录，禁止自动重建。云端已被作者修改时停止并保留改动。草稿对应的来源保留在 RemNote 原位，处于待验收状态时定时扫描跳过该来源，其余内容仍按序处理。只有用户明确认可后才执行 `approve-draft`，将该草稿恢复为可发布；此命令本身不发布。正式 `run` 复用已认可草稿的同一 ID，发布前重新核对源内容、云端内容及当日标题，不覆盖作者后续改动。
+
+配置 `seriesStartDate` 时，云端草稿和正式文章标题追加 `（第N 篇 | day D）`。篇数按专栏已发表文章数、专栏现存标题最大篇号与本地已发表回执最大篇号的最大值递增；草稿不占正式篇数。day 按上海时区从配置起始日期计算自然日，起始日为 day 1；同一天多篇共用 day 数。实际发布前重新计算，草稿中的编号只是当时预览。标题长度包含后缀，超过 100 字即停止。
+
+只有 `run` 会在指定窗口发布，窗口外仅恢复已有记录。`adopt` 用于用户明确指出已手动发布的文章：核对完整正文、可见布局、作者与专栏后，登记实际公开标题和 URL，将原子树归档；它不会新建或修改任何知乎文章。保存过的草稿若由用户手动发布，后续运行按同样条件核验并归档，不再发一次。已有回执冲突或对照不符时停止，不靠移除 `%` 隐藏问题。配置目录保存 `state.json`、`last-run.json`、`preview.html` 和 `preview.json`。运行使用进程排他锁，死进程残留锁可恢复，活进程持锁时拒绝并行。
+
+转换器直接输出知乎原生的列表表示：子列表放在已闭合的父 `li` 之后。标准 HTML 的 `<li>父项<ul>子项</ul></li>` 虽然网页显示正常，但知乎编辑器导入时会在父项闭合处额外插入空段落，不能作为发布输入。API 回读中的文字和语义列表一致也不足以证明编辑器导入一致；真实验收需将编辑器渲染后的内容块逐一对照源节点，比较空行数量与位置、项目深度、文字及节点内换行。
 
 任务以当前登录用户的 Limited 权限隐藏运行，禁止重叠实例，保留实际 Node 子流程的退出码。失败最多间隔 5 分钟重试两次；CLI 的窗口限制和已落盘回执仍约束每次重试，不会再次提交未知结果。注册任务不会立即执行发布。需 Windows 用户已登录、RemNote MCP 在线及现有 Chrome 登录态同步可用；不依赖 ChatGPT 桌面端中的 Codex 保持开启。暂停时停用该 Windows 计划任务，保留本机回执。恢复连接沿用已有 RemNote MCP 启动入口，不重启 RemNote 或用户正在使用的应用。不得通过删除未知结果记录、临时另发、扩大到其他 Document 或补发错过时段绕过限制。
 

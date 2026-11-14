@@ -106,7 +106,7 @@ def read_article(client, article_id):
     # A primary column is accepted only when the server also exposes that accepted contribution.
     columns.discard(None)
     return {"id": str(article.get("id", "")), "authorId": article.get("author", {}).get("id", ""),
-            "title": article.get("title", ""), "text": normalize(html), "format": format_structure(html),
+            "title": article.get("title", "") or "", "text": normalize(html), "format": format_structure(html),
             "columnIds": sorted(columns),
             "url": f"https://zhuanlan.zhihu.com/p/{article_id}"}
 
@@ -118,6 +118,78 @@ def check_column(client, column_id):
     if (column.get("url_token") or column.get("id")) != column_id or column.get("can_manage") is not True:
         raise ValueError("column_not_manageable")
     return {"columnId": column_id, "columnTitle": column.get("title", "")}
+
+
+def series_stats(client, column_id):
+    check_column(client, column_id)
+    column = client._get(f"https://zhuanlan.zhihu.com/api/columns/{column_id}")
+    count = column.get("articles_count")
+    if not isinstance(count, int) or not 0 <= count <= 10000:
+        raise ValueError("series_count_invalid")
+    articles = []
+    while len(articles) < count:
+        page = client._get(f"https://zhuanlan.zhihu.com/api/columns/{column_id}/articles", {"limit": 20, "offset": len(articles)})
+        page = page if isinstance(page, list) else page.get("data", [])
+        if not page:
+            raise ValueError("series_pagination_incomplete")
+        articles.extend(page)
+    ids = [str(article.get("id", "")) for article in articles]
+    if len(set(ids)) != len(ids) or len(ids) != count:
+        raise ValueError("series_listing_changed")
+    ordinals = []
+    for article in articles:
+        match = re.search(r"（第(\d+)\s*篇\s*\|\s*day\s*\d+）$", article.get("title", ""))
+        if match:
+            ordinals.append(int(match[1]))
+    return {"publishedCount": count, "maxOrdinal": max(ordinals, default=0)}
+
+
+def read_draft(client, article_id):
+    if not re.fullmatch(r"\d+", article_id):
+        raise ValueError("invalid_draft_id")
+    url = f"https://zhuanlan.zhihu.com/api/articles/{article_id}"
+    response = client._session.get(url, timeout=15)
+    if response.status_code == 404:
+        article = client._get(url + "/draft")
+    elif response.status_code == 200:
+        article = response.json()
+    else:
+        raise ValueError("draft_read_failed")
+    html = article.get("content", "") or ""
+    return {"id": str(article.get("id", "")), "authorId": article.get("author", {}).get("id", ""),
+            "title": article.get("title", "") or "", "text": normalize(html), "format": format_structure(html),
+            "state": article.get("state", ""), "editorUrl": f"https://zhuanlan.zhihu.com/p/{article_id}/edit"}
+
+
+def create_draft(client):
+    response = client._session.post("https://zhuanlan.zhihu.com/api/articles/drafts", json={}, timeout=15)
+    if response.status_code != 200:
+        raise ValueError("draft_create_failed")
+    return {"id": article_id_from_result(response.json())}
+
+
+def write_draft(client, article_id, title, html, account_id, expected):
+    current = read_draft(client, article_id)
+    if current["authorId"] != account_id or current["state"] != "draft":
+        raise ValueError("draft_identity_or_state_changed")
+    if any(current[key] != expected[key] for key in ("title", "text", "format")):
+        raise ValueError("cloud_draft_edited")
+    response = client._session.patch(f"https://zhuanlan.zhihu.com/api/articles/{article_id}/draft", json={"title": title, "content": html}, timeout=15)
+    if response.status_code != 200:
+        raise ValueError("draft_save_failed")
+    saved = read_draft(client, article_id)
+    if saved["title"] != title or saved["text"] != normalize(html) or saved["format"] != format_structure(html) or saved["state"] != "draft":
+        raise ValueError("draft_readback_mismatch")
+    return saved
+
+
+def publish_saved_draft(client, article_id, title, html, column_id, account_id, expected):
+    check_column(client, column_id)
+    write_draft(client, article_id, title, html, account_id, expected)
+    response = client._session.put(f"https://zhuanlan.zhihu.com/api/articles/{article_id}/publish", json={"column": column_id, "commentPermission": "anyone"}, timeout=15)
+    if response.status_code != 200:
+        raise ValueError("saved_draft_publish_failed")
+    return {"id": article_id_from_result(response.json())}
 
 
 def publish_in_column(client, title, html, column_id):
@@ -157,7 +229,18 @@ def main(request):
             return {**account, **check_column(client, request["columnId"])}
         if account["id"] != request["expectedAccountId"]:
             raise ValueError("zhihu_account_changed")
+        if action == "series":
+            return series_stats(client, request["columnId"])
+        if action == "create-draft":
+            check_column(client, request["columnId"])
+            return create_draft(client)
+        if action == "read-draft":
+            return read_draft(client, request["articleId"])
+        if action == "write-draft":
+            return write_draft(client, request["articleId"], request["title"], request["html"], account["id"], request["expected"])
         if action == "publish":
+            if request.get("draftId"):
+                return publish_saved_draft(client, request["draftId"], request["title"], request["html"], request["columnId"], account["id"], request["expected"])
             # One attempt only. The caller persists an unknown-result fence before this call.
             result = publish_in_column(client, request["title"], request["html"], request["columnId"])
             return {"id": article_id_from_result(result)}

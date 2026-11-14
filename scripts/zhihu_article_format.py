@@ -168,7 +168,11 @@ def prepare(nodes):
                 else:
                     result.append('<p class="ztext-empty-paragraph"><br/></p>')
                 continue
-            items.append("<li>" + inline_or_blocks(node["text"]) + render_level(node["children"]) + "</li>")
+            # Zhihu's Draft.js importer synthesizes an empty block for every
+            # closing parent <li> around a child list. Its native serializer
+            # places the child <ul> after the closed <li>, at the same level.
+            # Emit that representation so a hierarchy return is not a blank Rem.
+            items.append("<li>" + inline_or_blocks(node["text"]) + "</li>" + render_level(node["children"]))
         flush()
         return "".join(result)
 

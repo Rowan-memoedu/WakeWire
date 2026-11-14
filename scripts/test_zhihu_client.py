@@ -155,6 +155,92 @@ class AdapterTests(unittest.TestCase):
             adapter.publish_in_column(client, "Title", "<p>Body text</p>", "column")
         client.create_article.assert_not_called()
 
+    def test_series_stats_uses_published_column_members_not_drafts(self):
+        client = MagicMock()
+        client._get.side_effect = [
+            {"url_token": "column", "can_manage": True}, {"articles_count": 2},
+            [{"id": "1", "title": "First（第1 篇 | day 1）"}, {"id": "2", "title": "Latest（第4 篇 | day 2）"}],
+        ]
+        self.assertEqual(adapter.series_stats(client, "column"), {"publishedCount": 2, "maxOrdinal": 4})
+
+    def test_cloud_draft_roundtrip_only_creates_and_saves_never_publishes(self):
+        client = ZhihuClient({})
+        cloud = {"id": "666", "state": "draft", "author": {"id": "me"}, "title": "", "content": ""}
+        methods = []
+
+        def request(method, url, **kwargs):
+            methods.append(method.upper())
+            response = MagicMock()
+            response.status_code = 200
+            if method.upper() == "POST":
+                self.assertTrue(url.endswith("/articles/drafts"))
+                data = {"id": "666"}
+            elif method.upper() == "PATCH":
+                self.assertTrue(url.endswith("/666/draft"))
+                cloud.update(kwargs["json"])
+                cloud["content"] = kwargs["json"]["content"]
+                data = dict(cloud)
+            elif method.upper() == "GET":
+                data = dict(cloud)
+            else:
+                self.fail("draft verification must not publish")
+            response.json.return_value = data
+            return response
+
+        with patch.object(client._session, "request", side_effect=request):
+            self.assertEqual(adapter.create_draft(client), {"id": "666"})
+            before = adapter.read_draft(client, "666")
+            saved = adapter.write_draft(client, "666", "Draft（第2 篇 | day 2）", "<ul><li>Complete draft content</li></ul>", "me", before)
+            self.assertEqual(saved["state"], "draft")
+            self.assertEqual(saved["title"], "Draft（第2 篇 | day 2）")
+            self.assertEqual(saved["editorUrl"], "https://zhuanlan.zhihu.com/p/666/edit")
+            cloud["content"] = "<p>Author edited this</p>"
+            with self.assertRaisesRegex(ValueError, "cloud_draft_edited"):
+                adapter.write_draft(client, "666", "Overwrite", "<p>Other content</p>", "me", saved)
+        self.assertEqual(methods.count("POST"), 1)
+        self.assertEqual(methods.count("PATCH"), 1)
+        self.assertNotIn("PUT", methods)
+
+    def test_private_draft_is_read_via_draft_route_after_public_route_404(self):
+        client = MagicMock()
+        client._session.get.return_value.status_code = 404
+        client._get.return_value = {"id": "666", "state": "draft", "author": {"id": "me"}, "title": "", "content": ""}
+        self.assertEqual(adapter.read_draft(client, "666")["state"], "draft")
+        client._get.assert_called_once_with("https://zhuanlan.zhihu.com/api/articles/666/draft")
+
+    def test_approved_saved_draft_reuses_identity_and_publishes_in_column(self):
+        client = ZhihuClient({})
+        cloud = {"id": "666", "state": "draft", "author": {"id": "me"}, "title": "Earlier title", "content": "<p>Complete old body</p>"}
+        calls = []
+
+        def request(method, url, **kwargs):
+            calls.append(method.upper())
+            response = MagicMock()
+            response.status_code = 200
+            if "/columns/" in url:
+                data = {"url_token": "column", "can_manage": True}
+            elif method.upper() == "PATCH":
+                self.assertTrue(url.endswith("/666/draft"))
+                cloud.update(kwargs["json"])
+                data = dict(cloud)
+            elif method.upper() == "PUT":
+                self.assertTrue(url.endswith("/666/publish"))
+                self.assertEqual(kwargs["json"]["column"], "column")
+                data = {"id": "666", "state": "published"}
+            elif method.upper() == "GET":
+                data = dict(cloud)
+            else:
+                self.fail("must reuse approved draft without POST")
+            response.json.return_value = data
+            return response
+
+        with patch.object(client._session, "request", side_effect=request):
+            before = adapter.read_draft(client, "666")
+            result = adapter.publish_saved_draft(client, "666", "Final title", "<ul><li>Complete new body</li></ul>", "column", "me", before)
+        self.assertEqual(result, {"id": "666"})
+        self.assertNotIn("POST", calls)
+        self.assertEqual(calls.count("PUT"), 1)
+
 
 class LayoutTests(unittest.TestCase):
     def prepare(self, rows):
@@ -192,6 +278,15 @@ class LayoutTests(unittest.TestCase):
         valid = "<ul><li><p>Parent <strong>bold</strong></p><ul><li>Child detail</li></ul></li></ul>"
         native = '<ul><li data-pid="opaque">Parent <b>bold</b></li><ul><li>Child detail</li></ul></ul>'
         self.assertEqual(adapter.format_structure(valid), adapter.format_structure(native))
+
+    def test_zhihu_importer_input_closes_each_item_before_its_child_list(self):
+        # A conventional nested <li><ul> imports with phantom empty blocks in
+        # the real editor. An outline return must close only the child <ul>.
+        result = self.prepare([(1, "Parent section"), (2, "First child"), (3, "Deep detail"),
+                               (2, "Second child"), (1, ""), (1, "Last section")])
+        self.assertEqual(result["html"], '<ul><li>Parent section</li><ul><li>First child</li><ul><li>Deep detail</li></ul><li>Second child</li></ul></ul><p class="ztext-empty-paragraph"><br/></p><ul><li>Last section</li></ul>')
+        self.assertEqual([(block["kind"], block["depth"]) for block in self.blocks(result)],
+                         [("item", 1), ("item", 2), ("item", 3), ("item", 2), ("gap", 0), ("item", 1)])
 
     def test_style_offsets_are_visible_text_offsets_not_html_parser_columns(self):
         wrapped = "<ul>\n<li>Earlier text</li>\n<li><strong>Bold</strong></li></ul>"
