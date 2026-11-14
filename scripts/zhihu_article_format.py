@@ -176,7 +176,7 @@ def prepare(nodes):
         flush()
         return "".join(result)
 
-    html = render_level(root["children"]) + '<p class="ztext-empty-paragraph"><br/></p>'
+    html = render_level(root["children"])
     text = normalize(html)
     if not 9 <= len(text) <= 100000:
         raise ValueError("article_body_length")

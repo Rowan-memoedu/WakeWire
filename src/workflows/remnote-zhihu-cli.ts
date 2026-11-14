@@ -101,7 +101,7 @@ export class ZhihuPublisher implements ArticlePublisher {
     return this.call("publish", {
       title,
       html,
-      ...(draft?.draftId ? { draftId: draft.draftId, expected: draft } : {}),
+      ...(draft?.draftId ? { draftId: draft.draftId, expected: draft.cloudBefore ?? draft } : {}),
     });
   }
   seriesStats(): Promise<SeriesStats> {
